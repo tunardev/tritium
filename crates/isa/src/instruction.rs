@@ -27,6 +27,10 @@ impl Register {
         usize::from(self.0)
     }
 
+    fn from_field(word: u32, shift: u32) -> Register {
+        Register(((word >> shift) & 0x1F) as u8)
+    }
+
     fn field(self, shift: u32) -> u32 {
         u32::from(self.0) << shift
     }
@@ -213,6 +217,27 @@ pub enum Instruction {
     Exit,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecodeError {
+    UnknownOpcode(u32),
+    UnknownFunction(u32),
+    UnknownSpecial(u32),
+}
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DecodeError::UnknownOpcode(opcode) => write!(formatter, "unknown opcode {opcode:#x}"),
+            DecodeError::UnknownFunction(function) => {
+                write!(formatter, "unknown register function {function:#x}")
+            }
+            DecodeError::UnknownSpecial(special) => write!(formatter, "unknown special {special}"),
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
 fn opcode(code: u32) -> u32 {
     code << 26
 }
@@ -274,6 +299,87 @@ impl Instruction {
             Instruction::Exit => opcode(EXIT_OPCODE),
         }
     }
+
+    pub fn decode(word: u32) -> Result<Instruction, DecodeError> {
+        let code = word >> 26;
+        let first = Register::from_field(word, 21);
+        let second = Register::from_field(word, 16);
+        let immediate = word as u16 as i16;
+        if code == REGISTER_OPCODE {
+            let function = word & 0x7FF;
+            let operation = RegisterOperation::from_code(function)
+                .ok_or(DecodeError::UnknownFunction(function))?;
+            return Ok(Instruction::Register {
+                operation,
+                destination: first,
+                source: second,
+                second_source: Register::from_field(word, 11),
+            });
+        }
+        if let Some(operation) = ImmediateOperation::from_code(code) {
+            return Ok(Instruction::Immediate {
+                operation,
+                destination: first,
+                source: second,
+                immediate,
+            });
+        }
+        if let Some(condition) = BranchCondition::from_code(code) {
+            return Ok(Instruction::Branch {
+                condition,
+                source: first,
+                second_source: second,
+                offset: immediate,
+            });
+        }
+        for space in [MemorySpace::Global, MemorySpace::Shared] {
+            if let Some(width) =
+                code.checked_sub(space.load_opcode_base()).and_then(LoadWidth::from_code)
+            {
+                return Ok(Instruction::Load {
+                    width,
+                    space,
+                    destination: first,
+                    base: second,
+                    offset: immediate,
+                });
+            }
+            if let Some(width) =
+                code.checked_sub(space.store_opcode_base()).and_then(StoreWidth::from_code)
+            {
+                return Ok(Instruction::Store {
+                    width,
+                    space,
+                    value: first,
+                    base: second,
+                    offset: immediate,
+                });
+            }
+        }
+        match code {
+            LOAD_UPPER_OPCODE => {
+                Ok(Instruction::LoadUpper { destination: first, immediate: word as u16 })
+            }
+            READ_SPECIAL_OPCODE => {
+                let special_code = word & 0xFFFF;
+                let special = Special::from_code(special_code)
+                    .ok_or(DecodeError::UnknownSpecial(special_code))?;
+                Ok(Instruction::ReadSpecial { destination: first, special })
+            }
+            JUMP_AND_LINK_OPCODE => Ok(Instruction::JumpAndLink {
+                destination: first,
+                offset: (word & 0x1F_FFFF) as i32,
+            }),
+            JUMP_AND_LINK_REGISTER_OPCODE => Ok(Instruction::JumpAndLinkRegister {
+                destination: first,
+                base: second,
+                offset: immediate,
+            }),
+            BARRIER_OPCODE => Ok(Instruction::Barrier),
+            EXIT_OPCODE => Ok(Instruction::Exit),
+            _ => Err(DecodeError::UnknownOpcode(code)),
+        }
+    }
 }
 
 impl fmt::Display for Instruction {
@@ -328,6 +434,85 @@ mod tests {
 
     fn register(index: u8) -> Register {
         Register::new(index).unwrap()
+    }
+
+    fn sample_instructions() -> Vec<Instruction> {
+        let (first, second, third) = (register(1), register(17), register(31));
+        let mut instructions = Vec::new();
+        for &operation in RegisterOperation::ALL {
+            instructions.push(Instruction::Register {
+                operation,
+                destination: first,
+                source: second,
+                second_source: third,
+            });
+        }
+        for &operation in ImmediateOperation::ALL {
+            for immediate in [-1, 12345, -32768] {
+                instructions.push(Instruction::Immediate {
+                    operation,
+                    destination: third,
+                    source: first,
+                    immediate,
+                });
+            }
+        }
+        for space in [MemorySpace::Global, MemorySpace::Shared] {
+            for &width in LoadWidth::ALL {
+                instructions.push(Instruction::Load {
+                    width,
+                    space,
+                    destination: second,
+                    base: third,
+                    offset: -8,
+                });
+            }
+            for &width in StoreWidth::ALL {
+                instructions.push(Instruction::Store {
+                    width,
+                    space,
+                    value: second,
+                    base: first,
+                    offset: 32767,
+                });
+            }
+        }
+        for &condition in BranchCondition::ALL {
+            instructions.push(Instruction::Branch {
+                condition,
+                source: first,
+                second_source: third,
+                offset: -3,
+            });
+        }
+        for &special in Special::ALL {
+            instructions.push(Instruction::ReadSpecial { destination: second, special });
+        }
+        instructions.extend([
+            Instruction::LoadUpper { destination: first, immediate: 0xBEEF },
+            Instruction::JumpAndLink { destination: first, offset: 12345 },
+            Instruction::JumpAndLinkRegister { destination: third, base: second, offset: -4 },
+            Instruction::Barrier,
+            Instruction::Exit,
+        ]);
+        instructions
+    }
+
+    #[test]
+    fn instructions_survive_encode_and_decode() {
+        for instruction in sample_instructions() {
+            assert_eq!(Instruction::decode(instruction.encode()), Ok(instruction), "{instruction}");
+        }
+    }
+
+    #[test]
+    fn unknown_opcode_fails_to_decode() {
+        assert_eq!(Instruction::decode(0x3F << 26), Err(DecodeError::UnknownOpcode(0x3F)));
+    }
+
+    #[test]
+    fn unknown_function_fails_to_decode() {
+        assert_eq!(Instruction::decode(0x7FF), Err(DecodeError::UnknownFunction(0x7FF)));
     }
 
     #[test]
