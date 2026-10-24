@@ -1,6 +1,13 @@
+use std::collections::HashMap;
 use std::fmt;
 
-use tritium_isa::{ImmediateOperation, Instruction, Register, RegisterOperation, Special};
+use tritium_isa::{
+    BranchCondition, ImmediateOperation, Instruction, LoadWidth, MemorySpace, Register,
+    RegisterOperation, Special, StoreWidth,
+};
+
+const SHARED_SUFFIX: &str = "s";
+const JUMP_OFFSET_BITS: u32 = 21;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssembleError {
@@ -16,57 +23,112 @@ impl fmt::Display for AssembleError {
 
 impl std::error::Error for AssembleError {}
 
+struct Statement<'a> {
+    line: usize,
+    mnemonic: &'a str,
+    operands: Vec<&'a str>,
+    index: usize,
+}
+
 pub fn assemble(source: &str) -> Result<Vec<u32>, AssembleError> {
-    let mut words = Vec::new();
+    let mut labels = HashMap::new();
+    let mut statements = Vec::new();
+    let mut index = 0;
     for (offset, raw_line) in source.lines().enumerate() {
+        let line = offset + 1;
         let text = raw_line.trim();
         if text.is_empty() {
             continue;
         }
+        let error = |message: String| AssembleError { line, message };
+        if let Some(label) = text.strip_suffix(':') {
+            if !is_identifier(label) {
+                return Err(error(format!("invalid label {label:?}")));
+            }
+            if labels.insert(label, index).is_some() {
+                return Err(error(format!("label {label} is defined twice")));
+            }
+            continue;
+        }
         let (mnemonic, rest) = text.split_once(char::is_whitespace).unwrap_or((text, ""));
-        let operands: Vec<&str> = if rest.trim().is_empty() {
+        let operands = if rest.trim().is_empty() {
             Vec::new()
         } else {
             rest.split(',').map(str::trim).collect()
         };
-        let instruction = encode(mnemonic, &operands)
-            .map_err(|message| AssembleError { line: offset + 1, message })?;
-        words.push(instruction.encode());
+        statements.push(Statement { line, mnemonic, operands, index });
+        index += 1;
+    }
+
+    let mut words = Vec::with_capacity(index);
+    for statement in &statements {
+        let instructions = encode_statement(statement, &labels)
+            .map_err(|message| AssembleError { line: statement.line, message })?;
+        words.extend(instructions.iter().map(Instruction::encode));
     }
     Ok(words)
 }
 
-fn encode(mnemonic: &str, operands: &[&str]) -> Result<Instruction, String> {
+fn encode_statement(
+    statement: &Statement<'_>,
+    labels: &HashMap<&str, usize>,
+) -> Result<Vec<Instruction>, String> {
+    let operands = &statement.operands;
+    let mnemonic = statement.mnemonic;
+    let target = |text: &str, bits: u32| resolve_target(text, statement.index, labels, bits);
+
     match mnemonic {
+        "jal" => {
+            expect_operands(operands, 2)?;
+            Ok(vec![Instruction::JumpAndLink {
+                destination: parse_register(operands[0])?,
+                offset: target(operands[1], JUMP_OFFSET_BITS)? as i32,
+            }])
+        }
+        "jalr" => {
+            expect_operands(operands, 3)?;
+            Ok(vec![Instruction::JumpAndLinkRegister {
+                destination: parse_register(operands[0])?,
+                base: parse_register(operands[1])?,
+                offset: parse_signed_16(operands[2])?,
+            }])
+        }
         "lui" => {
             expect_operands(operands, 2)?;
             let value = parse_number(operands[1])?;
             let immediate = u16::try_from(value)
                 .map_err(|_| format!("{value} does not fit in 16 unsigned bits"))?;
-            return Ok(Instruction::LoadUpper {
+            Ok(vec![Instruction::LoadUpper {
                 destination: parse_register(operands[0])?,
                 immediate,
-            });
+            }])
         }
         "sreg" => {
             expect_operands(operands, 2)?;
             let special = Special::from_mnemonic(operands[1])
                 .ok_or_else(|| format!("unknown special register {}", operands[1]))?;
-            return Ok(Instruction::ReadSpecial {
+            Ok(vec![Instruction::ReadSpecial {
                 destination: parse_register(operands[0])?,
                 special,
-            });
+            }])
         }
         "bar" => {
             expect_operands(operands, 0)?;
-            return Ok(Instruction::Barrier);
+            Ok(vec![Instruction::Barrier])
         }
         "exit" => {
             expect_operands(operands, 0)?;
-            return Ok(Instruction::Exit);
+            Ok(vec![Instruction::Exit])
         }
-        _ => {}
+        _ => encode_operation(mnemonic, operands, target).map(|instruction| vec![instruction]),
     }
+}
+
+fn encode_operation(
+    mnemonic: &str,
+    operands: &[&str],
+    target: impl Fn(&str, u32) -> Result<i64, String>,
+) -> Result<Instruction, String> {
     if let Some(operation) = RegisterOperation::from_mnemonic(mnemonic) {
         expect_operands(operands, 3)?;
         return Ok(Instruction::Register {
@@ -93,6 +155,46 @@ fn encode(mnemonic: &str, operands: &[&str]) -> Result<Instruction, String> {
             immediate,
         });
     }
+    if let Some(condition) = BranchCondition::from_mnemonic(mnemonic) {
+        expect_operands(operands, 3)?;
+        return Ok(Instruction::Branch {
+            condition,
+            source: parse_register(operands[0])?,
+            second_source: parse_register(operands[1])?,
+            offset: target(operands[2], 16)? as i16,
+        });
+    }
+    let (base_mnemonic, space) = match mnemonic.strip_suffix(SHARED_SUFFIX) {
+        Some(stripped)
+            if LoadWidth::from_mnemonic(stripped).is_some()
+                || StoreWidth::from_mnemonic(stripped).is_some() =>
+        {
+            (stripped, MemorySpace::Shared)
+        }
+        _ => (mnemonic, MemorySpace::Global),
+    };
+    if let Some(width) = LoadWidth::from_mnemonic(base_mnemonic) {
+        expect_operands(operands, 2)?;
+        let (offset, base) = parse_memory(operands[1])?;
+        return Ok(Instruction::Load {
+            width,
+            space,
+            destination: parse_register(operands[0])?,
+            base,
+            offset,
+        });
+    }
+    if let Some(width) = StoreWidth::from_mnemonic(base_mnemonic) {
+        expect_operands(operands, 2)?;
+        let (offset, base) = parse_memory(operands[1])?;
+        return Ok(Instruction::Store {
+            width,
+            space,
+            value: parse_register(operands[0])?,
+            base,
+            offset,
+        });
+    }
     Err(format!("unknown mnemonic {mnemonic}"))
 }
 
@@ -102,6 +204,12 @@ fn expect_operands(operands: &[&str], count: usize) -> Result<(), String> {
     } else {
         Err(format!("expected {count} operands, found {}", operands.len()))
     }
+}
+
+fn is_identifier(text: &str) -> bool {
+    let mut characters = text.chars();
+    characters.next().is_some_and(|first| first.is_ascii_alphabetic() || first == '_')
+        && characters.all(|character| character.is_ascii_alphanumeric() || character == '_')
 }
 
 fn parse_register(text: &str) -> Result<Register, String> {
@@ -135,5 +243,32 @@ fn parse_logical_16(text: &str) -> Result<i16, String> {
         Ok(value as u16 as i16)
     } else {
         Err(format!("{value} does not fit in 16 bits"))
+    }
+}
+
+fn parse_memory(text: &str) -> Result<(i16, Register), String> {
+    let (offset, rest) =
+        text.split_once('(').ok_or_else(|| format!("expected offset(base), found {text}"))?;
+    let base = rest.strip_suffix(')').ok_or_else(|| format!("expected ) in {text}"))?;
+    let offset = if offset.trim().is_empty() { 0 } else { parse_signed_16(offset.trim())? };
+    Ok((offset, parse_register(base.trim())?))
+}
+
+fn resolve_target(
+    text: &str,
+    index: usize,
+    labels: &HashMap<&str, usize>,
+    bits: u32,
+) -> Result<i64, String> {
+    let offset = match labels.get(text) {
+        Some(&target) => target as i64 - index as i64,
+        None if is_identifier(text) => return Err(format!("unknown label {text}")),
+        None => parse_number(text)?,
+    };
+    let limit = 1i64 << (bits - 1);
+    if (-limit..limit).contains(&offset) {
+        Ok(offset)
+    } else {
+        Err(format!("target {text} is {offset} instructions away, beyond the {bits}-bit offset"))
     }
 }
