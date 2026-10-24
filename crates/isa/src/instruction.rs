@@ -90,6 +90,11 @@ operation_enum!(RegisterOperation {
     Maximum = 11, "max";
     MultiplyBytes = 12, "mul8";
     Select = 13, "select";
+    TernaryDot = 14, "tdot";
+    Scale = 15, "scale";
+    Exp2 = 16, "exp2";
+    ReciprocalSquareRoot = 17, "rsqrt";
+    SaturateInt8 = 18, "sat8";
 });
 
 operation_enum!(ImmediateOperation {
