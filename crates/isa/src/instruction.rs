@@ -373,7 +373,7 @@ impl Instruction {
             }
             JUMP_AND_LINK_OPCODE => Ok(Instruction::JumpAndLink {
                 destination: first,
-                offset: (word & 0x1F_FFFF) as i32,
+                offset: ((word << 11) as i32) >> 11,
             }),
             JUMP_AND_LINK_REGISTER_OPCODE => Ok(Instruction::JumpAndLinkRegister {
                 destination: first,
@@ -518,6 +518,21 @@ mod tests {
     #[test]
     fn unknown_function_fails_to_decode() {
         assert_eq!(Instruction::decode(0x7FF), Err(DecodeError::UnknownFunction(0x7FF)));
+    }
+
+    #[test]
+    fn extreme_offsets_keep_their_sign() {
+        let branch = Instruction::Branch {
+            condition: BranchCondition::Equal,
+            source: register(1),
+            second_source: register(2),
+            offset: -32768,
+        };
+        assert_eq!(Instruction::decode(branch.encode()), Ok(branch));
+        for offset in [-(1 << 20), (1 << 20) - 1] {
+            let jump = Instruction::JumpAndLink { destination: Register::ZERO, offset };
+            assert_eq!(Instruction::decode(jump.encode()), Ok(jump));
+        }
     }
 
     #[test]
