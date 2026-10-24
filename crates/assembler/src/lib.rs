@@ -2,8 +2,8 @@ use std::collections::HashMap;
 use std::fmt;
 
 use tritium_isa::{
-    BranchCondition, ImmediateOperation, Instruction, LoadWidth, MemorySpace, Register,
-    RegisterOperation, Special, StoreWidth,
+    BranchCondition, DecodeError, ImmediateOperation, Instruction, LoadWidth, MemorySpace,
+    Register, RegisterOperation, Special, StoreWidth,
 };
 
 const SHARED_SUFFIX: &str = "s";
@@ -68,6 +68,14 @@ pub fn assemble(source: &str) -> Result<Vec<u32>, AssembleError> {
         words.extend(instructions.iter().map(Instruction::encode));
     }
     Ok(words)
+}
+
+pub fn disassemble(words: &[u32]) -> Result<String, DecodeError> {
+    let lines = words
+        .iter()
+        .map(|&word| Instruction::decode(word).map(|instruction| instruction.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(lines.join("\n"))
 }
 
 fn statement_size(mnemonic: &str, operands: &[&str]) -> Result<usize, String> {
