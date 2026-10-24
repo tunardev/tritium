@@ -3,5 +3,12 @@
 version = 4
 
 [[package]]
+name = "tritium-assembler"
+version = "0.1.0"
+dependencies = [
+ "tritium-isa",
+]
+
+[[package]]
 name = "tritium-isa"
 version = "0.1.0"
