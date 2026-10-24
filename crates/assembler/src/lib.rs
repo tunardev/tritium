@@ -56,8 +56,9 @@ pub fn assemble(source: &str) -> Result<Vec<u32>, AssembleError> {
         } else {
             rest.split(',').map(str::trim).collect()
         };
+        let size = statement_size(mnemonic, &operands).map_err(error)?;
         statements.push(Statement { line, mnemonic, operands, index });
-        index += 1;
+        index += size;
     }
 
     let mut words = Vec::with_capacity(index);
@@ -69,6 +70,14 @@ pub fn assemble(source: &str) -> Result<Vec<u32>, AssembleError> {
     Ok(words)
 }
 
+fn statement_size(mnemonic: &str, operands: &[&str]) -> Result<usize, String> {
+    if mnemonic != "li" {
+        return Ok(1);
+    }
+    let value = parse_load_immediate(operands.get(1).copied().unwrap_or_default())?;
+    Ok(if (i64::from(i16::MIN)..=i64::from(u16::MAX)).contains(&value) { 1 } else { 2 })
+}
+
 fn encode_statement(
     statement: &Statement<'_>,
     labels: &HashMap<&str, usize>,
@@ -78,6 +87,45 @@ fn encode_statement(
     let target = |text: &str, bits: u32| resolve_target(text, statement.index, labels, bits);
 
     match mnemonic {
+        "li" => {
+            expect_operands(operands, 2)?;
+            let destination = parse_register(operands[0])?;
+            let value = parse_load_immediate(operands[1])?;
+            if (i64::from(i16::MIN)..=i64::from(u16::MAX)).contains(&value) {
+                return Ok(vec![Instruction::Immediate {
+                    operation: ImmediateOperation::AddImmediate,
+                    destination,
+                    source: Register::ZERO,
+                    immediate: value as i16,
+                }]);
+            }
+            let bits = value as u32;
+            Ok(vec![
+                Instruction::LoadUpper { destination, immediate: (bits >> 16) as u16 },
+                Instruction::Immediate {
+                    operation: ImmediateOperation::OrImmediate,
+                    destination,
+                    source: destination,
+                    immediate: bits as u16 as i16,
+                },
+            ])
+        }
+        "mov" => {
+            expect_operands(operands, 2)?;
+            Ok(vec![Instruction::Register {
+                operation: RegisterOperation::Add,
+                destination: parse_register(operands[0])?,
+                source: parse_register(operands[1])?,
+                second_source: Register::ZERO,
+            }])
+        }
+        "j" => {
+            expect_operands(operands, 1)?;
+            Ok(vec![Instruction::JumpAndLink {
+                destination: Register::ZERO,
+                offset: target(operands[0], JUMP_OFFSET_BITS)? as i32,
+            }])
+        }
         "jal" => {
             expect_operands(operands, 2)?;
             Ok(vec![Instruction::JumpAndLink {
@@ -243,6 +291,15 @@ fn parse_logical_16(text: &str) -> Result<i16, String> {
         Ok(value as u16 as i16)
     } else {
         Err(format!("{value} does not fit in 16 bits"))
+    }
+}
+
+fn parse_load_immediate(text: &str) -> Result<i64, String> {
+    let value = parse_number(text)?;
+    if (i64::from(i32::MIN)..=i64::from(u32::MAX)).contains(&value) {
+        Ok(if value > i64::from(i32::MAX) { i64::from(value as u32 as i32) } else { value })
+    } else {
+        Err(format!("{value} does not fit in 32 bits"))
     }
 }
 
