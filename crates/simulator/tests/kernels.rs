@@ -47,6 +47,55 @@ fn vector_add_covers_every_thread() {
 }
 
 #[test]
+fn shared_memory_reduction_uses_barrier() {
+    let program = assemble(
+        "sreg r10, thread_index\nsreg r11, block_index\nsreg r12, block_threads\n\
+         mul8 r13, r11, r12\nadd r13, r13, r10\nslli r13, r13, 2\nadd r13, r1, r13\n\
+         lw r14, 0(r13)\nslli r15, r10, 2\nsws r14, 0(r15)\nbar\nli r16, 32\n\
+         loop:\nlws r17, 0(r15)\nadd r18, r10, r16\nandi r18, r18, 63\nslli r18, r18, 2\n\
+         lws r19, 0(r18)\nbar\nadd r19, r17, r19\nslt r20, r10, r16\nselect r20, r19, r17\n\
+         sws r20, 0(r15)\nbar\nsrli r16, r16, 1\nbne r16, r0, loop\n\
+         lws r21, 0(r0)\nslli r22, r11, 2\nadd r22, r2, r22\nsw r21, 0(r22)\nexit",
+    )
+    .unwrap();
+    let mut device = Device::new(4096);
+    let values: Vec<u32> = pseudo_random(3, 256).iter().map(|value| value % 1000).collect();
+    write_words(&mut device, 0, &values);
+
+    let config = LaunchConfig { grid_blocks: 4, block_threads: 64, shared_bytes: 256 };
+    device.launch(&program, config, &[0, 2048]).unwrap();
+
+    let expected: Vec<u32> = values.chunks(64).map(|block| block.iter().sum()).collect();
+    assert_eq!(read_words(&device, 2048, 4), expected);
+}
+
+#[test]
+fn special_registers_report_launch_shape() {
+    let program = assemble(
+        "sreg r10, block_index\nsreg r11, block_threads\nmul8 r12, r10, r11\n\
+         sreg r13, thread_index\nadd r12, r12, r13\nli r14, 24\nmul8 r12, r12, r14\n\
+         add r12, r1, r12\nsw r13, 0(r12)\nsw r10, 4(r12)\nsw r11, 8(r12)\n\
+         sreg r15, grid_blocks\nsw r15, 12(r12)\nsreg r15, lane_index\nsw r15, 16(r12)\n\
+         sreg r15, warp_index\nsw r15, 20(r12)\nexit",
+    )
+    .unwrap();
+    let mut device = Device::new(4096);
+
+    let config = LaunchConfig { grid_blocks: 2, block_threads: 48, shared_bytes: 0 };
+    device.launch(&program, config, &[0]).unwrap();
+
+    for block in 0..2u32 {
+        for thread in 0..48u32 {
+            let global_thread = (block * 48 + thread) as usize;
+            assert_eq!(
+                read_words(&device, global_thread * 24, 6),
+                vec![thread, block, 48, 2, thread % 16, thread / 16]
+            );
+        }
+    }
+}
+
+#[test]
 fn select_picks_lanes_without_branching() {
     let program = assemble(
         "sreg r10, lane_index\nslli r10, r10, 2\nadd r11, r1, r10\nlw r12, 0(r11)\n\

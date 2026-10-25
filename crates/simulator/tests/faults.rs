@@ -50,6 +50,13 @@ fn endless_loop_stops_at_limit() {
 }
 
 #[test]
+fn barrier_without_partners_deadlocks() {
+    let config = LaunchConfig { block_threads: 32, ..ONE_WARP };
+    let fault = run("sreg r1, warp_index\nbeq r1, r0, done\nbar\ndone:\nexit", config).unwrap_err();
+    assert!(matches!(fault, Fault::BarrierDeadlock { block: 0 }), "{fault:?}");
+}
+
+#[test]
 fn invalid_launch_shapes_are_rejected() {
     let mut device = Device::new(256);
     let program = assemble("exit").unwrap();

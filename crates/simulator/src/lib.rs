@@ -7,6 +7,7 @@ use tritium_isa::{
 };
 
 const DEFAULT_STEP_LIMIT: u64 = 100_000_000;
+const MAX_BLOCK_WARPS: u32 = 4;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LaunchConfig {
@@ -28,6 +29,7 @@ pub enum Fault {
     MisalignedAccess { block: u32, warp: u32, program_counter: u32, address: u32 },
     AddressOutOfRange { block: u32, warp: u32, program_counter: u32, address: u32 },
     DivergentBranch { block: u32, warp: u32, program_counter: u32 },
+    BarrierDeadlock { block: u32 },
     StepLimitExceeded,
 }
 
@@ -55,6 +57,9 @@ impl fmt::Display for Fault {
                 formatter,
                 "block {block} warp {warp} at {program_counter}: lanes disagree on a branch"
             ),
+            Fault::BarrierDeadlock { block } => {
+                write!(formatter, "block {block}: a warp waits at a barrier no other warp reaches")
+            }
             Fault::StepLimitExceeded => formatter.write_str("the step limit was exceeded"),
         }
     }
@@ -91,16 +96,31 @@ impl Device {
         arguments: &[u32],
     ) -> Result<LaunchReport, Fault> {
         validate_launch(config, arguments)?;
+        let warp_count = config.block_threads / WARP_LANES as u32;
         let mut steps = 0u64;
         for block in 0..config.grid_blocks {
             let mut shared = vec![0u8; config.shared_bytes as usize];
-            let mut warp = Warp::new(block, 0, config, arguments);
-            while warp.status() == WarpStatus::Running {
-                if steps >= self.step_limit {
-                    return Err(Fault::StepLimitExceeded);
+            let mut warps: Vec<Warp> =
+                (0..warp_count).map(|warp| Warp::new(block, warp, config, arguments)).collect();
+            loop {
+                for warp in &mut warps {
+                    while warp.status() == WarpStatus::Running {
+                        if steps >= self.step_limit {
+                            return Err(Fault::StepLimitExceeded);
+                        }
+                        steps += 1;
+                        warp.step(program, &mut self.global, &mut shared)?;
+                    }
                 }
-                steps += 1;
-                warp.step(program, &mut self.global, &mut shared)?;
+                let is_waiting = warps.iter().any(|warp| warp.status() == WarpStatus::AtBarrier);
+                if !is_waiting {
+                    break;
+                }
+                let live = warps.iter().filter(|warp| warp.status() != WarpStatus::Exited).count();
+                if live == 1 && warps.len() > 1 {
+                    return Err(Fault::BarrierDeadlock { block });
+                }
+                warps.iter_mut().for_each(Warp::release_barrier);
             }
         }
         Ok(LaunchReport { warp_instructions: steps })
@@ -113,8 +133,14 @@ fn validate_launch(config: LaunchConfig, arguments: &[u32]) -> Result<(), Fault>
     if config.grid_blocks == 0 {
         return invalid("the grid has no blocks".into());
     }
-    if config.block_threads != lanes {
-        return invalid(format!("block threads must be 16, not {}", config.block_threads));
+    if config.block_threads == 0
+        || config.block_threads % lanes != 0
+        || config.block_threads > MAX_BLOCK_WARPS * lanes
+    {
+        return invalid(format!(
+            "block threads must be 16, 32, 48 or 64, not {}",
+            config.block_threads
+        ));
     }
     if config.shared_bytes as usize > SHARED_BYTES {
         return invalid(format!("{} shared bytes exceed {SHARED_BYTES}", config.shared_bytes));
@@ -128,6 +154,7 @@ fn validate_launch(config: LaunchConfig, arguments: &[u32]) -> Result<(), Fault>
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WarpStatus {
     Running,
+    AtBarrier,
     Exited,
 }
 
@@ -151,6 +178,12 @@ impl Warp {
 
     fn status(&self) -> WarpStatus {
         self.status
+    }
+
+    fn release_barrier(&mut self) {
+        if self.status == WarpStatus::AtBarrier {
+            self.status = WarpStatus::Running;
+        }
     }
 
     fn step(&mut self, program: &[u32], global: &mut [u8], shared: &mut [u8]) -> Result<(), Fault> {
@@ -259,7 +292,7 @@ impl Warp {
                 }
                 next = target;
             }
-            Instruction::Barrier => {}
+            Instruction::Barrier => self.status = WarpStatus::AtBarrier,
             Instruction::Exit => self.status = WarpStatus::Exited,
         }
         self.program_counter = next;
