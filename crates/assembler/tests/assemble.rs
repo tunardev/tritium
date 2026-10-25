@@ -58,7 +58,29 @@ fn load_immediate_expands_when_needed() {
 }
 
 #[test]
+fn errors_name_offending_line() {
+    assert_eq!(assemble("add r1, r2, r3\nfrobnicate r1").unwrap_err().line, 2);
+    assert_eq!(assemble("addi r1, r2, 40000").unwrap_err().line, 1);
+    assert_eq!(assemble("add r1, r2, r32").unwrap_err().line, 1);
+    assert_eq!(assemble("beq r1, r2, nowhere").unwrap_err().line, 1);
+    assert_eq!(assemble("add r1, r2").unwrap_err().line, 1);
+    assert_eq!(assemble("loop:\nloop:\nexit").unwrap_err().line, 2);
+}
+
+#[test]
+fn far_branch_targets_are_rejected() {
+    let source = format!("far:\n{}beq r1, r2, far", "add r1, r1, r1\n".repeat(40000));
+    assert_eq!(assemble(&source).unwrap_err().line, 40002);
+}
+
+#[test]
 fn disassembly_reassembles_same_words() {
     let words = assemble(&sample_program()).unwrap();
     assert_eq!(assemble(&disassemble(&words).unwrap()).unwrap(), words);
+}
+
+#[test]
+fn error_messages_include_line_number() {
+    let error = assemble("exit\nadd r1").unwrap_err();
+    assert!(error.to_string().starts_with("line 2: "), "{error}");
 }
