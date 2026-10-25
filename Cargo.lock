@@ -12,3 +12,11 @@ dependencies = [
 [[package]]
 name = "tritium-isa"
 version = "0.1.0"
+
+[[package]]
+name = "tritium-simulator"
+version = "0.1.0"
+dependencies = [
+ "tritium-assembler",
+ "tritium-isa",
+]
