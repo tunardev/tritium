@@ -1,4 +1,5 @@
 use tritium_assembler::assemble;
+use tritium_isa::{TRITS_PER_WORD, pack_trits};
 use tritium_simulator::{Device, LaunchConfig};
 
 fn read_words(device: &Device, address: usize, count: usize) -> Vec<u32> {
@@ -67,6 +68,57 @@ fn shared_memory_reduction_uses_barrier() {
 
     let expected: Vec<u32> = values.chunks(64).map(|block| block.iter().sum()).collect();
     assert_eq!(read_words(&device, 2048, 4), expected);
+}
+
+#[test]
+fn ternary_dot_matches_reference_sum() {
+    let words_per_row = 3;
+    let row_bytes = 4 * words_per_row;
+    let length = words_per_row * TRITS_PER_WORD;
+    let randoms = pseudo_random(4, 16 * length + length);
+    let trits: Vec<Vec<i8>> = (0..16)
+        .map(|row| (0..length).map(|index| (randoms[row * length + index] % 3) as i8 - 1).collect())
+        .collect();
+    let activations: Vec<i8> =
+        randoms[16 * length..].iter().map(|value| (value % 255) as i8).collect();
+
+    let mut device = Device::new(4096);
+    for (row, row_trits) in trits.iter().enumerate() {
+        device.global_mut()[row * row_bytes..][..row_bytes].copy_from_slice(&pack_trits(row_trits));
+    }
+    for (index, &activation) in activations.iter().enumerate() {
+        device.global_mut()[1024 + index] = activation as u8;
+    }
+    let mut source = format!(
+        "sreg r10, lane_index\nmov r12, r10\nli r11, {copy_passes}\ncopy:\nadd r13, r2, r12\n\
+         lb r14, 0(r13)\nsbs r14, 0(r12)\naddi r12, r12, 16\naddi r11, r11, -1\n\
+         bne r11, r0, copy\nli r19, {row_bytes}\nmul8 r20, r10, r19\nadd r20, r1, r20\n\
+         li r21, 0\n",
+        copy_passes = length.div_ceil(16)
+    );
+    for word in 0..words_per_row {
+        source += &format!(
+            "addi r22, r20, {}\nli r23, {}\ntdot r21, r22, r23\n",
+            4 * word,
+            word * TRITS_PER_WORD
+        );
+    }
+    source += "slli r24, r10, 2\nadd r24, r3, r24\nsw r21, 0(r24)\nexit";
+    let program = assemble(&source).unwrap();
+
+    let config = LaunchConfig { grid_blocks: 1, block_threads: 16, shared_bytes: 256 };
+    device.launch(&program, config, &[0, 1024, 2048]).unwrap();
+
+    let expected: Vec<u32> = trits
+        .iter()
+        .map(|row| {
+            row.iter()
+                .zip(&activations)
+                .map(|(&trit, &activation)| i32::from(trit) * i32::from(activation))
+                .sum::<i32>() as u32
+        })
+        .collect();
+    assert_eq!(read_words(&device, 2048, 16), expected);
 }
 
 #[test]
