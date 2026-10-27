@@ -183,3 +183,19 @@ fn backward_jumps_repeat_loops() {
 
     assert_eq!(read_words(&device, 0, 16), vec![5; 16]);
 }
+
+#[test]
+fn halfword_loads_extend_by_signedness() {
+    let program = assemble(
+        "lh r10, 0(r1)\nlhu r11, 0(r1)\nsreg r12, lane_index\nslli r12, r12, 3\n\
+         add r12, r2, r12\nsw r10, 0(r12)\nsw r11, 4(r12)\nexit",
+    )
+    .unwrap();
+    let mut device = Device::new(512);
+    device.global_mut()[0..2].copy_from_slice(&(-2i16).to_le_bytes());
+
+    let config = LaunchConfig { grid_blocks: 1, block_threads: 16, shared_bytes: 0 };
+    device.launch(&program, config, &[0, 256]).unwrap();
+
+    assert_eq!(read_words(&device, 256, 2), vec![(-2i32) as u32, 0xFFFE]);
+}

@@ -213,7 +213,7 @@ impl Warp {
         let bytes = &memory[start..start + size];
         Ok(match width {
             LoadWidth::Word => u32::from_le_bytes(bytes.try_into().unwrap()),
-            LoadWidth::Half => u32::from(u16::from_le_bytes(bytes.try_into().unwrap())),
+            LoadWidth::Half => i16::from_le_bytes(bytes.try_into().unwrap()) as i32 as u32,
             LoadWidth::HalfUnsigned => u32::from(u16::from_le_bytes(bytes.try_into().unwrap())),
             LoadWidth::Byte => bytes[0] as i8 as i32 as u32,
             LoadWidth::ByteUnsigned => u32::from(bytes[0]),
