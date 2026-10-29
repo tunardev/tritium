@@ -262,8 +262,8 @@ impl Warp {
             RegisterOperation::SetLessThanUnsigned => u32::from(left < right),
             RegisterOperation::Minimum => (left as i32).min(right as i32) as u32,
             RegisterOperation::Maximum => (left as i32).max(right as i32) as u32,
-            RegisterOperation::MultiplyBytes => {
-                (i32::from(left as u8 as i8) * i32::from(right as u8 as i8)) as u32
+            RegisterOperation::MultiplyHalfwords => {
+                (i32::from(left as u16 as i16) * i32::from(right as u16 as i16)) as u32
             }
             RegisterOperation::Select => {
                 if self.read(lane, destination) != 0 {

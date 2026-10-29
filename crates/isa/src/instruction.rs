@@ -88,7 +88,7 @@ operation_enum!(RegisterOperation {
     SetLessThanUnsigned = 9, "sltu";
     Minimum = 10, "min";
     Maximum = 11, "max";
-    MultiplyBytes = 12, "mul8";
+    MultiplyHalfwords = 12, "mul16";
     Select = 13, "select";
     TernaryDot = 14, "tdot";
     Scale = 15, "scale";

@@ -28,7 +28,7 @@ fn pseudo_random(seed: u32, count: usize) -> Vec<u32> {
 #[test]
 fn vector_add_covers_every_thread() {
     let program = assemble(
-        "sreg r10, block_index\nsreg r11, block_threads\nmul8 r10, r10, r11\n\
+        "sreg r10, block_index\nsreg r11, block_threads\nmul16 r10, r10, r11\n\
          sreg r12, thread_index\nadd r10, r10, r12\nslli r10, r10, 2\n\
          add r13, r1, r10\nlw r14, 0(r13)\nadd r13, r2, r10\nlw r15, 0(r13)\n\
          add r14, r14, r15\nadd r13, r3, r10\nsw r14, 0(r13)\nexit",
@@ -39,7 +39,7 @@ fn vector_add_covers_every_thread() {
     write_words(&mut device, 0, &first);
     write_words(&mut device, 1024, &second);
 
-    let config = LaunchConfig { grid_blocks: 16, block_threads: 16, shared_bytes: 0 };
+    let config = LaunchConfig { grid_blocks: 4, block_threads: 64, shared_bytes: 0 };
     device.launch(&program, config, &[0, 1024, 2048]).unwrap();
 
     let expected: Vec<u32> =
@@ -51,7 +51,7 @@ fn vector_add_covers_every_thread() {
 fn shared_memory_reduction_uses_barrier() {
     let program = assemble(
         "sreg r10, thread_index\nsreg r11, block_index\nsreg r12, block_threads\n\
-         mul8 r13, r11, r12\nadd r13, r13, r10\nslli r13, r13, 2\nadd r13, r1, r13\n\
+         mul16 r13, r11, r12\nadd r13, r13, r10\nslli r13, r13, 2\nadd r13, r1, r13\n\
          lw r14, 0(r13)\nslli r15, r10, 2\nsws r14, 0(r15)\nbar\nli r16, 32\n\
          loop:\nlws r17, 0(r15)\nadd r18, r10, r16\nandi r18, r18, 63\nslli r18, r18, 2\n\
          lws r19, 0(r18)\nbar\nadd r19, r17, r19\nslt r20, r10, r16\nselect r20, r19, r17\n\
@@ -92,7 +92,7 @@ fn ternary_dot_matches_reference_sum() {
     let mut source = format!(
         "sreg r10, lane_index\nmov r12, r10\nli r11, {copy_passes}\ncopy:\nadd r13, r2, r12\n\
          lb r14, 0(r13)\nsbs r14, 0(r12)\naddi r12, r12, 16\naddi r11, r11, -1\n\
-         bne r11, r0, copy\nli r19, {row_bytes}\nmul8 r20, r10, r19\nadd r20, r1, r20\n\
+         bne r11, r0, copy\nli r19, {row_bytes}\nmul16 r20, r10, r19\nadd r20, r1, r20\n\
          li r21, 0\n",
         copy_passes = length.div_ceil(16)
     );
@@ -124,8 +124,8 @@ fn ternary_dot_matches_reference_sum() {
 #[test]
 fn special_registers_report_launch_shape() {
     let program = assemble(
-        "sreg r10, block_index\nsreg r11, block_threads\nmul8 r12, r10, r11\n\
-         sreg r13, thread_index\nadd r12, r12, r13\nli r14, 24\nmul8 r12, r12, r14\n\
+        "sreg r10, block_index\nsreg r11, block_threads\nmul16 r12, r10, r11\n\
+         sreg r13, thread_index\nadd r12, r12, r13\nli r14, 24\nmul16 r12, r12, r14\n\
          add r12, r1, r12\nsw r13, 0(r12)\nsw r10, 4(r12)\nsw r11, 8(r12)\n\
          sreg r15, grid_blocks\nsw r15, 12(r12)\nsreg r15, lane_index\nsw r15, 16(r12)\n\
          sreg r15, warp_index\nsw r15, 20(r12)\nexit",
