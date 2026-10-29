@@ -1,20 +1,12 @@
-pub const TRITS_PER_BYTE: usize = 4;
+pub const TRITS_PER_BYTE: usize = 5;
 pub const TRITS_PER_WORD: usize = 4 * TRITS_PER_BYTE;
 
-fn trit_code(trit: i8) -> u8 {
-    match trit {
-        0 => 0,
-        1 => 1,
-        -1 => 2,
-        _ => panic!("{trit} is not a trit"),
-    }
-}
+const VALID_BYTES: u8 = 243;
 
-fn code_trit(code: u8) -> i8 {
-    match code {
-        1 => 1,
-        2 => -1,
-        _ => 0,
+fn trit_digit(trit: i8) -> u8 {
+    match trit {
+        -1..=1 => (trit + 1) as u8,
+        _ => panic!("{trit} is not a trit"),
     }
 }
 
@@ -24,21 +16,20 @@ pub fn pack_trits(trits: &[i8]) -> Vec<u8> {
     padded.resize(padded_length, 0);
     padded
         .chunks_exact(TRITS_PER_BYTE)
-        .map(|chunk| {
-            chunk
-                .iter()
-                .enumerate()
-                .fold(0u8, |byte, (index, &trit)| byte | (trit_code(trit) << (2 * index)))
-        })
+        .map(|chunk| chunk.iter().rev().fold(0u8, |byte, &trit| byte * 3 + trit_digit(trit)))
         .collect()
 }
 
 pub fn unpack_byte(byte: u8) -> [i8; TRITS_PER_BYTE] {
-    let codes: [u8; TRITS_PER_BYTE] = std::array::from_fn(|index| (byte >> (2 * index)) & 3);
-    if codes.contains(&3) {
+    if byte >= VALID_BYTES {
         return [0; TRITS_PER_BYTE];
     }
-    codes.map(code_trit)
+    let mut remaining = byte;
+    std::array::from_fn(|_| {
+        let digit = remaining % 3;
+        remaining /= 3;
+        digit as i8 - 1
+    })
 }
 
 pub fn unpack_word(word: u32) -> [i8; TRITS_PER_WORD] {
@@ -54,18 +45,23 @@ mod tests {
     use super::*;
 
     #[test]
+    fn packed_weights_use_1_6_bits() {
+        let trits = vec![1i8; 2000];
+        assert!(pack_trits(&trits).len() * 8 <= trits.len() * 16 / 10);
+    }
+
+    #[test]
     fn every_valid_byte_round_trips() {
-        for byte in 0u8..=255 {
-            let is_valid = (0..TRITS_PER_BYTE).all(|index| (byte >> (2 * index)) & 3 != 3);
-            if is_valid {
-                assert_eq!(pack_trits(&unpack_byte(byte))[0], byte);
-            }
+        for byte in 0u8..243 {
+            assert_eq!(pack_trits(&unpack_byte(byte))[0], byte);
         }
     }
 
     #[test]
-    fn invalid_codes_decode_to_zero() {
-        assert_eq!(unpack_byte(0xFF), [0; TRITS_PER_BYTE]);
+    fn invalid_bytes_decode_to_zero() {
+        for byte in 243u8..=255 {
+            assert_eq!(unpack_byte(byte), [0; TRITS_PER_BYTE]);
+        }
     }
 
     #[test]
