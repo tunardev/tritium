@@ -83,7 +83,7 @@ fn statement_size(mnemonic: &str, operands: &[&str]) -> Result<usize, String> {
         return Ok(1);
     }
     let value = parse_load_immediate(operands.get(1).copied().unwrap_or_default())?;
-    Ok(if (i64::from(i16::MIN)..=i64::from(u16::MAX)).contains(&value) { 1 } else { 2 })
+    Ok(if i16::try_from(value).is_ok() { 1 } else { 2 })
 }
 
 fn encode_statement(
@@ -99,12 +99,12 @@ fn encode_statement(
             expect_operands(operands, 2)?;
             let destination = parse_register(operands[0])?;
             let value = parse_load_immediate(operands[1])?;
-            if (i64::from(i16::MIN)..=i64::from(u16::MAX)).contains(&value) {
+            if let Ok(immediate) = i16::try_from(value) {
                 return Ok(vec![Instruction::Immediate {
                     operation: ImmediateOperation::AddImmediate,
                     destination,
                     source: Register::ZERO,
-                    immediate: value as i16,
+                    immediate,
                 }]);
             }
             let bits = value as u32;

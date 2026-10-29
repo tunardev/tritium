@@ -84,3 +84,9 @@ fn error_messages_include_line_number() {
     let error = assemble("exit\nadd r1").unwrap_err();
     assert!(error.to_string().starts_with("line 2: "), "{error}");
 }
+
+#[test]
+fn load_immediate_keeps_unsigned_halfwords() {
+    let words = assemble("li r1, 40000").unwrap();
+    assert_eq!(words, assemble("lui r1, 0\nori r1, r1, 0x9C40").unwrap());
+}
