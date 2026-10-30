@@ -86,6 +86,20 @@ fn error_messages_include_line_number() {
 }
 
 #[test]
+fn logical_immediates_must_be_unsigned() {
+    assert_eq!(assemble("andi r1, r2, -1").unwrap_err().line, 1);
+    let words = assemble("ori r1, r2, 0xFFFF").unwrap();
+    assert_eq!(disassemble(&words).unwrap(), "ori r1, r2, 65535");
+}
+
+#[test]
+fn shifts_beyond_31_are_rejected() {
+    assert_eq!(assemble("slli r1, r2, 40").unwrap_err().line, 1);
+    assert_eq!(assemble("srai r1, r2, -1").unwrap_err().line, 1);
+    assert!(assemble("srli r1, r2, 31").is_ok());
+}
+
+#[test]
 fn load_immediate_keeps_unsigned_halfwords() {
     let words = assemble("li r1, 40000").unwrap();
     assert_eq!(words, assemble("lui r1, 0\nori r1, r1, 0x9C40").unwrap());

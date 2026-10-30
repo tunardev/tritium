@@ -398,7 +398,26 @@ impl fmt::Display for Instruction {
                 )
             }
             Instruction::Immediate { operation, destination, source, immediate } => {
-                write!(formatter, "{} {destination}, {source}, {immediate}", operation.mnemonic())
+                let is_logical = matches!(
+                    operation,
+                    ImmediateOperation::AndImmediate
+                        | ImmediateOperation::OrImmediate
+                        | ImmediateOperation::XorImmediate
+                );
+                if is_logical {
+                    write!(
+                        formatter,
+                        "{} {destination}, {source}, {}",
+                        operation.mnemonic(),
+                        immediate as u16
+                    )
+                } else {
+                    write!(
+                        formatter,
+                        "{} {destination}, {source}, {immediate}",
+                        operation.mnemonic()
+                    )
+                }
             }
             Instruction::Load { width, space, destination, base, offset } => write!(
                 formatter,

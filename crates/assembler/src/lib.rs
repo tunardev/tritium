@@ -202,8 +202,19 @@ fn encode_operation(
                 | ImmediateOperation::OrImmediate
                 | ImmediateOperation::XorImmediate
         );
-        let immediate =
-            if is_logical { parse_logical_16(operands[2])? } else { parse_signed_16(operands[2])? };
+        let is_shift = matches!(
+            operation,
+            ImmediateOperation::ShiftLeftImmediate
+                | ImmediateOperation::ShiftRightLogicalImmediate
+                | ImmediateOperation::ShiftRightArithmeticImmediate
+        );
+        let immediate = if is_logical {
+            parse_unsigned_16(operands[2])?
+        } else if is_shift {
+            parse_shift_amount(operands[2])?
+        } else {
+            parse_signed_16(operands[2])?
+        };
         return Ok(Instruction::Immediate {
             operation,
             destination: parse_register(operands[0])?,
@@ -293,12 +304,19 @@ fn parse_signed_16(text: &str) -> Result<i16, String> {
     i16::try_from(value).map_err(|_| format!("{value} does not fit in 16 signed bits"))
 }
 
-fn parse_logical_16(text: &str) -> Result<i16, String> {
+fn parse_unsigned_16(text: &str) -> Result<i16, String> {
     let value = parse_number(text)?;
-    if (i64::from(i16::MIN)..=i64::from(u16::MAX)).contains(&value) {
-        Ok(value as u16 as i16)
+    u16::try_from(value)
+        .map(|unsigned| unsigned as i16)
+        .map_err(|_| format!("{value} does not fit in 16 unsigned bits"))
+}
+
+fn parse_shift_amount(text: &str) -> Result<i16, String> {
+    let value = parse_number(text)?;
+    if (0..32).contains(&value) {
+        Ok(value as i16)
     } else {
-        Err(format!("{value} does not fit in 16 bits"))
+        Err(format!("shift amount {value} is outside 0 to 31"))
     }
 }
 
