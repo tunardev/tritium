@@ -1,7 +1,7 @@
 use std::sync::OnceLock;
 
 const ONE: i64 = 1 << 16;
-const EXP2_TABLE_SIZE: usize = 64;
+const EXP2_TABLE_SIZE: usize = 256;
 const RSQRT_TABLE_SIZE: usize = 192;
 
 pub fn exp2_table() -> [i32; EXP2_TABLE_SIZE] {
@@ -86,7 +86,7 @@ mod tests {
     fn exp2_stays_within_table_resolution() {
         for x in (-16 * 65536..0).step_by(997) {
             let exact = 2f64.powf(x as f64 / 65536.0) * 65536.0;
-            assert!((exp2(x) as f64 - exact).abs() <= exact * 0.011 + 1.0, "{x}");
+            assert!((exp2(x) as f64 - exact).abs() <= exact * 0.003 + 1.0, "{x}");
         }
     }
 
