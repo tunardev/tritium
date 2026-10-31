@@ -114,8 +114,7 @@ impl Device {
                 if !is_waiting {
                     break;
                 }
-                let live = warps.iter().filter(|warp| warp.status() != WarpStatus::Exited).count();
-                if live == 1 && warps.len() > 1 {
+                if warps.iter().any(|warp| warp.status() == WarpStatus::Exited) {
                     return Err(Fault::BarrierDeadlock { block });
                 }
                 warps.iter_mut().for_each(Warp::release_barrier);

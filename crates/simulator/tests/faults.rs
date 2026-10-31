@@ -77,3 +77,10 @@ fn undecodable_instruction_word_faults() {
     let fault = device.launch(&[0xFFFF_FFFF], ONE_WARP, &[]).unwrap_err();
     assert!(matches!(fault, Fault::InvalidInstruction { word: 0xFFFF_FFFF, .. }), "{fault:?}");
 }
+
+#[test]
+fn barrier_after_warp_exit_deadlocks() {
+    let config = LaunchConfig { block_threads: 48, ..ONE_WARP };
+    let fault = run("sreg r1, warp_index\nbeq r1, r0, done\nbar\ndone:\nexit", config).unwrap_err();
+    assert!(matches!(fault, Fault::BarrierDeadlock { block: 0 }), "{fault:?}");
+}
