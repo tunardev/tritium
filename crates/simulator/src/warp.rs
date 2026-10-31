@@ -237,6 +237,7 @@ impl Warp {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn register_operation(
         &self,
         operation: RegisterOperation,

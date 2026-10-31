@@ -37,7 +37,7 @@ pub fn exp2(x: i32) -> i32 {
     if shift > 16 {
         return 0;
     }
-    let value = exp2_table()[fraction * EXP2_TABLE_SIZE >> 16];
+    let value = exp2_table()[(fraction * EXP2_TABLE_SIZE) >> 16];
     (value + (1 << (shift - 1))) >> shift
 }
 
