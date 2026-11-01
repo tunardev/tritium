@@ -1,10 +1,8 @@
 use tritium_isa::{
-    BranchCondition, ImmediateOperation, Instruction, LoadWidth, MemorySpace, REGISTER_COUNT,
-    Register, RegisterOperation, Special, StoreWidth, TRITS_PER_WORD, WARP_LANES, exp2, rsqrt,
-    saturate_to_int8, scale, unpack_word,
+    BranchCondition, Fault, ImmediateOperation, Instruction, LaunchConfig, LoadWidth, MemorySpace,
+    REGISTER_COUNT, Register, RegisterOperation, Special, StoreWidth, TRITS_PER_WORD, WARP_LANES,
+    exp2, rsqrt, saturate_to_int8, scale, unpack_word,
 };
-
-use crate::device::{Fault, LaunchConfig};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WarpStatus {
