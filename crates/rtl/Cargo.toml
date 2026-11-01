@@ -1,0 +1,12 @@
+[package]
+name = "tritium-rtl"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+links = "tritium_harness"
+
+[dependencies]
+tritium-isa = { path = "../isa" }
+
+[dev-dependencies]
+tritium-assembler = { path = "../assembler" }
