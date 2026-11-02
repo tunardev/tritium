@@ -10,3 +10,4 @@ tritium-isa = { path = "../isa" }
 
 [dev-dependencies]
 tritium-assembler = { path = "../assembler" }
+tritium-simulator = { path = "../simulator" }

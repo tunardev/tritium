@@ -5,15 +5,19 @@ use tritium_isa::{Fault, LaunchConfig, LaunchReport, validate_launch};
 const PROGRAM_WORDS: usize = 4096;
 const DEFAULT_STEP_LIMIT: u64 = 100_000_000;
 const CYCLES_PER_STEP_LIMIT: u64 = 4096;
+const MEMORY_LATENCY: u32 = 4;
 
 const HOST_STATUS: u32 = 0;
 const HOST_GRID_BLOCKS: u32 = 1;
 const HOST_BLOCK_THREADS: u32 = 2;
+const HOST_ARGUMENT_COUNT: u32 = 4;
+const HOST_GLOBAL_BYTES: u32 = 5;
 const HOST_PROGRAM_LENGTH: u32 = 6;
 const HOST_STEP_LIMIT_LOW: u32 = 7;
 const HOST_STEP_LIMIT_HIGH: u32 = 8;
 const HOST_PROGRAM_ADDRESS: u32 = 9;
 const HOST_PROGRAM_DATA: u32 = 10;
+const HOST_ARGUMENTS: u32 = 16;
 const HOST_FAULT_BLOCK: u32 = 24;
 const HOST_FAULT_WARP: u32 = 25;
 const HOST_FAULT_PROGRAM_COUNTER: u32 = 26;
@@ -29,7 +33,7 @@ struct Harness {
 }
 
 unsafe extern "C" {
-    fn tritium_harness_create(global_bytes: usize) -> *mut Harness;
+    fn tritium_harness_create(global_bytes: usize, latency: u32) -> *mut Harness;
     fn tritium_harness_destroy(harness: *mut Harness);
     fn tritium_harness_global(harness: *mut Harness) -> *mut u8;
     fn tritium_harness_write_register(harness: *mut Harness, address: u32, value: u32);
@@ -46,7 +50,7 @@ pub struct RtlDevice {
 
 impl RtlDevice {
     pub fn new(global_bytes: usize) -> RtlDevice {
-        let harness = NonNull::new(unsafe { tritium_harness_create(global_bytes) })
+        let harness = NonNull::new(unsafe { tritium_harness_create(global_bytes, MEMORY_LATENCY) })
             .expect("the Verilator harness could not be created");
         RtlDevice { harness, global_bytes, step_limit: DEFAULT_STEP_LIMIT, cycles: 0 }
     }
@@ -97,6 +101,11 @@ impl RtlDevice {
         self.write(HOST_PROGRAM_LENGTH, program.len() as u32);
         self.write(HOST_GRID_BLOCKS, config.grid_blocks);
         self.write(HOST_BLOCK_THREADS, config.block_threads);
+        self.write(HOST_GLOBAL_BYTES, self.global_bytes as u32);
+        self.write(HOST_ARGUMENT_COUNT, arguments.len() as u32);
+        for (index, &argument) in arguments.iter().enumerate() {
+            self.write(HOST_ARGUMENTS + index as u32, argument);
+        }
         self.write(HOST_STEP_LIMIT_LOW, self.step_limit as u32);
         self.write(HOST_STEP_LIMIT_HIGH, (self.step_limit >> 32) as u32);
         self.write(HOST_STATUS, 1);

@@ -8,10 +8,15 @@ module compute_unit
     input logic [PROGRAM_BITS-1:0] program_address,
     input logic [            31:0] program_data,
 
-    input logic        start,
-    input logic [31:0] block_threads,
-    input logic [31:0] program_length,
-    input logic        is_step_allowed,
+    input logic                                start,
+    input logic [                  31:0]       block_index,
+    input logic [                  31:0]       grid_blocks,
+    input logic [                  31:0]       block_threads,
+    input logic [                  31:0]       global_bytes,
+    input logic [                  31:0]       program_length,
+    input logic [                   3:0]       argument_count,
+    input logic [MAX_ARGUMENTS-1:0][31:0]       arguments,
+    input logic                                is_step_allowed,
 
     output logic          busy,
     output logic          retire,
@@ -19,15 +24,28 @@ module compute_unit
     output fault_t        fault_kind,
     output logic   [31:0] fault_warp,
     output logic   [31:0] fault_program_counter,
-    output logic   [31:0] fault_value
+    output logic   [31:0] fault_value,
+
+    output logic        memory_request,
+    output logic        memory_write,
+    output logic [31:0] memory_address,
+    output logic [ 3:0] memory_byte_enable,
+    output logic [31:0] memory_write_data,
+    input  logic        memory_response,
+    input  logic [31:0] memory_read_data
 );
+
+  localparam int REGISTER_ADDRESS_BITS = WARP_BITS + REGISTER_BITS;
 
   typedef enum logic [2:0] {
     STATE_IDLE,
+    STATE_INITIALIZE,
     STATE_SELECT,
     STATE_FETCH,
     STATE_DECODE,
-    STATE_EXECUTE
+    STATE_EXECUTE,
+    STATE_MEMORY_ADDRESS,
+    STATE_MEMORY_WAIT
   } state_t;
 
   typedef enum logic [1:0] {
@@ -41,17 +59,35 @@ module compute_unit
   logic [31:0] program_counters[MAX_WARPS];
   logic [WARP_BITS-1:0] warp;
   logic [WARP_BITS:0] warp_count;
+  logic [REGISTER_ADDRESS_BITS-1:0] initialize_index;
+  logic [$clog2(LANES)-1:0] lane;
 
   logic [31:0] program_memory[PROGRAM_WORDS];
   logic [31:0] instruction;
   decoded_t decoded;
+  decoded_t current;
+  logic [4:0] destination;
 
   logic [31:0] program_counter;
   logic is_any_running;
   logic [WARP_BITS-1:0] next_warp;
 
+  logic [LANES-1:0][31:0] read_data_a;
+  logic [LANES-1:0][31:0] read_data_b;
+  logic [LANES-1:0][31:0] read_data_c;
+  logic [LANES-1:0] write_enable;
+  logic [REGISTER_ADDRESS_BITS-1:0] write_address;
+  logic [LANES-1:0][31:0] write_data;
+  logic [LANES-1:0][31:0] lane_results;
+
+  logic [31:0] lane_address;
+  logic [2:0] access_bytes;
+  logic [31:0] shifted_read_data;
+  logic [31:0] loaded_value;
+
   assign program_counter = program_counters[warp];
   assign busy = state != STATE_IDLE;
+  assign destination = instruction[25:21];
 
   always_ff @(posedge clock) begin
     if (program_write) program_memory[program_address] <= program_data;
@@ -59,9 +95,52 @@ module compute_unit
   end
 
   decoder decoder (
-      .opcode(instruction[31:26]),
+      .word(instruction),
       .decoded(decoded)
   );
+
+  register_file register_file (
+      .clock(clock),
+      .read(state == STATE_DECODE),
+      .read_address_a({warp, instruction[25:21]}),
+      .read_address_b({warp, instruction[20:16]}),
+      .read_address_c({warp, instruction[15:11]}),
+      .read_data_a(read_data_a),
+      .read_data_b(read_data_b),
+      .read_data_c(read_data_c),
+      .write_enable(write_enable),
+      .write_address(write_address),
+      .write_data(write_data)
+  );
+
+  for (genvar index = 0; index < LANES; index++) begin : gen_lanes
+    logic [31:0] alu_result;
+    logic [31:0] special;
+
+    lane_alu lane_alu (
+        .operation(current.operation),
+        .left(read_data_b[index]),
+        .right(current.kind == KIND_IMMEDIATE ? current.immediate : read_data_c[index]),
+        .destination(read_data_a[index]),
+        .result(alu_result)
+    );
+
+    always_comb begin
+      unique case (current.special)
+        SPECIAL_THREAD_INDEX: special = 32'(warp) * LANES + index;
+        SPECIAL_BLOCK_INDEX: special = block_index;
+        SPECIAL_BLOCK_THREADS: special = block_threads;
+        SPECIAL_GRID_BLOCKS: special = grid_blocks;
+        SPECIAL_LANE_INDEX: special = index;
+        default: special = 32'(warp);
+      endcase
+      unique case (current.kind)
+        KIND_LOAD_UPPER: lane_results[index] = current.immediate;
+        KIND_READ_SPECIAL: lane_results[index] = special;
+        default: lane_results[index] = alu_result;
+      endcase
+    end
+  end
 
   always_comb begin
     is_any_running = 1'b0;
@@ -76,6 +155,61 @@ module compute_unit
     end
   end
 
+  always_comb begin
+    lane_address = read_data_b[lane] + current.immediate;
+    if (current.kind == KIND_STORE) begin
+      unique case (current.width)
+        STORE_WIDTH_WORD: access_bytes = 3'd4;
+        STORE_WIDTH_HALF: access_bytes = 3'd2;
+        default: access_bytes = 3'd1;
+      endcase
+    end else begin
+      unique case (current.width)
+        WIDTH_WORD: access_bytes = 3'd4;
+        WIDTH_HALF, WIDTH_HALF_UNSIGNED: access_bytes = 3'd2;
+        default: access_bytes = 3'd1;
+      endcase
+    end
+    shifted_read_data = memory_read_data >> {lane_address[1:0], 3'b0};
+    unique case (current.width)
+      WIDTH_HALF: loaded_value = {{16{shifted_read_data[15]}}, shifted_read_data[15:0]};
+      WIDTH_HALF_UNSIGNED: loaded_value = {16'b0, shifted_read_data[15:0]};
+      WIDTH_BYTE: loaded_value = {{24{shifted_read_data[7]}}, shifted_read_data[7:0]};
+      WIDTH_BYTE_UNSIGNED: loaded_value = {24'b0, shifted_read_data[7:0]};
+      default: loaded_value = shifted_read_data;
+    endcase
+  end
+
+  always_comb begin
+    write_enable = '0;
+    write_address = {warp, destination};
+    write_data = lane_results;
+    unique case (state)
+      STATE_INITIALIZE: begin
+        logic [REGISTER_BITS-1:0] register_index;
+        register_index = initialize_index[REGISTER_BITS-1:0];
+        write_enable = '1;
+        write_address = initialize_index;
+        for (int index = 0; index < LANES; index++) begin
+          write_data[index] = '0;
+          if (register_index != 0 && 4'(register_index) <= argument_count)
+            write_data[index] = arguments[register_index-1];
+        end
+      end
+      STATE_EXECUTE: begin
+        if (destination != 0 && current.kind inside {KIND_REGISTER, KIND_IMMEDIATE,
+            KIND_LOAD_UPPER, KIND_READ_SPECIAL})
+          write_enable = '1;
+      end
+      STATE_MEMORY_WAIT: begin
+        if (memory_response && current.kind == KIND_LOAD && destination != 0)
+          write_enable[lane] = 1'b1;
+        write_data = {LANES{loaded_value}};
+      end
+      default: ;
+    endcase
+  end
+
   task automatic raise(input fault_t kind, input logic [31:0] value);
     fault <= 1'b1;
     fault_kind <= kind;
@@ -85,9 +219,16 @@ module compute_unit
     state <= STATE_IDLE;
   endtask
 
+  task automatic finish_instruction(input logic [31:0] next_program_counter);
+    program_counters[warp] <= next_program_counter;
+    retire <= 1'b1;
+    state <= STATE_SELECT;
+  endtask
+
   always_ff @(posedge clock) begin
     retire <= 1'b0;
     fault <= 1'b0;
+    memory_request <= 1'b0;
     if (reset) begin
       state <= STATE_IDLE;
     end else begin
@@ -100,8 +241,13 @@ module compute_unit
               program_counters[index] <= '0;
             end
             warp <= WARP_BITS'(MAX_WARPS - 1);
-            state <= STATE_SELECT;
+            initialize_index <= '0;
+            state <= STATE_INITIALIZE;
           end
+        end
+        STATE_INITIALIZE: begin
+          initialize_index <= initialize_index + 1;
+          if (initialize_index == '1) state <= STATE_SELECT;
         end
         STATE_SELECT: begin
           if (is_any_running) begin
@@ -118,17 +264,47 @@ module compute_unit
           else state <= STATE_DECODE;
         end
         STATE_DECODE: begin
+          current <= decoded;
           if (!decoded.is_valid) raise(FAULT_INVALID_INSTRUCTION, instruction);
           else state <= STATE_EXECUTE;
         end
         STATE_EXECUTE: begin
-          unique case (decoded.kind)
-            KIND_EXIT: warp_status[warp] <= WARP_EXITED;
-            default: ;
+          unique case (current.kind)
+            KIND_LOAD, KIND_STORE: begin
+              lane <= '0;
+              state <= STATE_MEMORY_ADDRESS;
+            end
+            KIND_EXIT: begin
+              warp_status[warp] <= WARP_EXITED;
+              finish_instruction(program_counter + 1);
+            end
+            default: finish_instruction(program_counter + 1);
           endcase
-          program_counters[warp] <= program_counter + 1;
-          retire <= 1'b1;
-          state <= STATE_SELECT;
+        end
+        STATE_MEMORY_ADDRESS: begin
+          if ((lane_address & 32'(access_bytes - 1)) != 0)
+            raise(FAULT_MISALIGNED_ACCESS, lane_address);
+          else if ({1'b0, lane_address} + 33'(access_bytes) > {1'b0, global_bytes})
+            raise(FAULT_ADDRESS_OUT_OF_RANGE, lane_address);
+          else begin
+            memory_request <= 1'b1;
+            memory_write <= current.kind == KIND_STORE;
+            memory_address <= {lane_address[31:2], 2'b0};
+            memory_write_data <= read_data_a[lane] << {lane_address[1:0], 3'b0};
+            unique case (access_bytes)
+              3'd4: memory_byte_enable <= 4'b1111;
+              3'd2: memory_byte_enable <= 4'b0011 << lane_address[1:0];
+              default: memory_byte_enable <= 4'b0001 << lane_address[1:0];
+            endcase
+            state <= STATE_MEMORY_WAIT;
+          end
+        end
+        STATE_MEMORY_WAIT: begin
+          if (memory_response) begin
+            lane <= lane + 1;
+            if (lane == '1) finish_instruction(program_counter + 1);
+            else state <= STATE_MEMORY_ADDRESS;
+          end
         end
         default: state <= STATE_IDLE;
       endcase

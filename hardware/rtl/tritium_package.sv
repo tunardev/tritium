@@ -64,9 +64,49 @@ package tritium_package;
     KIND_EXIT
   } kind_t;
 
+  localparam logic [4:0] FUNCTION_ADD = 5'd0;
+  localparam logic [4:0] FUNCTION_SUBTRACT = 5'd1;
+  localparam logic [4:0] FUNCTION_AND = 5'd2;
+  localparam logic [4:0] FUNCTION_OR = 5'd3;
+  localparam logic [4:0] FUNCTION_XOR = 5'd4;
+  localparam logic [4:0] FUNCTION_SHIFT_LEFT = 5'd5;
+  localparam logic [4:0] FUNCTION_SHIFT_RIGHT_LOGICAL = 5'd6;
+  localparam logic [4:0] FUNCTION_SHIFT_RIGHT_ARITHMETIC = 5'd7;
+  localparam logic [4:0] FUNCTION_SET_LESS_THAN = 5'd8;
+  localparam logic [4:0] FUNCTION_SET_LESS_THAN_UNSIGNED = 5'd9;
+  localparam logic [4:0] FUNCTION_MINIMUM = 5'd10;
+  localparam logic [4:0] FUNCTION_MAXIMUM = 5'd11;
+  localparam logic [4:0] FUNCTION_MULTIPLY_HALFWORDS = 5'd12;
+  localparam logic [4:0] FUNCTION_SELECT = 5'd13;
+  localparam logic [4:0] FUNCTION_TERNARY_DOT = 5'd14;
+  localparam logic [4:0] FUNCTION_SCALE = 5'd15;
+  localparam logic [4:0] FUNCTION_EXP2 = 5'd16;
+  localparam logic [4:0] FUNCTION_RECIPROCAL_SQUARE_ROOT = 5'd17;
+  localparam logic [4:0] FUNCTION_SATURATE_INT8 = 5'd18;
+
+  localparam logic [2:0] WIDTH_WORD = 3'd0;
+  localparam logic [2:0] WIDTH_HALF = 3'd1;
+  localparam logic [2:0] WIDTH_HALF_UNSIGNED = 3'd2;
+  localparam logic [2:0] WIDTH_BYTE = 3'd3;
+  localparam logic [2:0] WIDTH_BYTE_UNSIGNED = 3'd4;
+  localparam logic [2:0] STORE_WIDTH_WORD = 3'd0;
+  localparam logic [2:0] STORE_WIDTH_HALF = 3'd1;
+  localparam logic [2:0] STORE_WIDTH_BYTE = 3'd2;
+
+  localparam logic [2:0] SPECIAL_THREAD_INDEX = 3'd0;
+  localparam logic [2:0] SPECIAL_BLOCK_INDEX = 3'd1;
+  localparam logic [2:0] SPECIAL_BLOCK_THREADS = 3'd2;
+  localparam logic [2:0] SPECIAL_GRID_BLOCKS = 3'd3;
+  localparam logic [2:0] SPECIAL_LANE_INDEX = 3'd4;
+  localparam logic [2:0] SPECIAL_WARP_INDEX = 3'd5;
+
   typedef struct packed {
     logic is_valid;
     kind_t kind;
+    logic [4:0] operation;
+    logic [31:0] immediate;
+    logic [2:0] width;
+    logic [2:0] special;
   } decoded_t;
 
 endpackage

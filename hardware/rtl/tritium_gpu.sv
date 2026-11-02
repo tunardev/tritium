@@ -7,11 +7,22 @@ module tritium_gpu
     input  logic        host_write,
     input  logic [ 4:0] host_address,
     input  logic [31:0] host_write_data,
-    output logic [31:0] host_read_data
+    output logic [31:0] host_read_data,
+
+    output logic        memory_request,
+    output logic        memory_write,
+    output logic [31:0] memory_address,
+    output logic [ 3:0] memory_byte_enable,
+    output logic [31:0] memory_write_data,
+    input  logic        memory_response,
+    input  logic [31:0] memory_read_data
 );
 
   logic [31:0] grid_blocks;
   logic [31:0] block_threads;
+  logic [31:0] global_bytes;
+  logic [3:0] argument_count;
+  logic [MAX_ARGUMENTS-1:0][31:0] arguments;
   logic [31:0] program_length;
   logic [63:0] step_limit;
   logic [63:0] steps;
@@ -48,8 +59,13 @@ module tritium_gpu
       .program_address(program_address),
       .program_data(host_write_data),
       .start(unit_start),
+      .block_index(unit_block),
+      .grid_blocks(grid_blocks),
       .block_threads(block_threads),
+      .global_bytes(global_bytes),
       .program_length(program_length),
+      .argument_count(argument_count),
+      .arguments(arguments),
       .is_step_allowed(steps < step_limit),
       .busy(unit_busy),
       .retire(unit_retire),
@@ -57,7 +73,14 @@ module tritium_gpu
       .fault_kind(unit_fault_kind),
       .fault_warp(unit_fault_warp),
       .fault_program_counter(unit_fault_program_counter),
-      .fault_value(unit_fault_value)
+      .fault_value(unit_fault_value),
+      .memory_request(memory_request),
+      .memory_write(memory_write),
+      .memory_address(memory_address),
+      .memory_byte_enable(memory_byte_enable),
+      .memory_write_data(memory_write_data),
+      .memory_response(memory_response),
+      .memory_read_data(memory_read_data)
   );
 
   always_ff @(posedge clock) begin
@@ -81,12 +104,17 @@ module tritium_gpu
           end
           HOST_GRID_BLOCKS: grid_blocks <= host_write_data;
           HOST_BLOCK_THREADS: block_threads <= host_write_data;
+          HOST_ARGUMENT_COUNT: argument_count <= host_write_data[3:0];
+          HOST_GLOBAL_BYTES: global_bytes <= host_write_data;
           HOST_PROGRAM_LENGTH: program_length <= host_write_data;
           HOST_STEP_LIMIT_LOW: step_limit[31:0] <= host_write_data;
           HOST_STEP_LIMIT_HIGH: step_limit[63:32] <= host_write_data;
           HOST_PROGRAM_ADDRESS: program_address <= host_write_data[PROGRAM_BITS-1:0];
           HOST_PROGRAM_DATA: program_address <= program_address + 1;
-          default: ;
+          default: begin
+            if (host_address[4:3] == HOST_ARGUMENTS[4:3])
+              arguments[host_address[2:0]] <= host_write_data;
+          end
         endcase
       end
 

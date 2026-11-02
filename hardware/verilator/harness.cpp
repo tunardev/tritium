@@ -14,19 +14,43 @@ struct Harness {
   std::unique_ptr<VerilatedContext> context;
   std::unique_ptr<Vtritium_gpu> model;
   std::vector<uint8_t> global;
+  uint32_t latency;
   uint64_t cycles = 0;
+  uint32_t countdown = 0;
+  uint32_t pending_data = 0;
 
-  explicit Harness(size_t global_bytes)
+  Harness(size_t global_bytes, uint32_t latency)
       : context(std::make_unique<VerilatedContext>()),
         model(std::make_unique<Vtritium_gpu>(context.get())),
-        global((global_bytes + 3) / 4 * 4, 0) {}
+        global((global_bytes + 3) / 4 * 4, 0),
+        latency(latency) {}
+
+  void access() {
+    uint32_t address = model->memory_address;
+    pending_data = 0;
+    if (address + 4 > global.size()) return;
+    for (uint32_t byte = 0; byte < 4; byte++) {
+      if (model->memory_write && (model->memory_byte_enable >> byte & 1))
+        global[address + byte] = model->memory_write_data >> (8 * byte);
+      pending_data |= uint32_t(global[address + byte]) << (8 * byte);
+    }
+  }
 
   void tick() {
+    model->memory_response = 0;
+    if (countdown > 0 && --countdown == 0) {
+      model->memory_response = 1;
+      model->memory_read_data = pending_data;
+    }
     model->clock = 0;
     model->eval();
     model->clock = 1;
     model->eval();
     cycles++;
+    if (model->memory_request) {
+      access();
+      countdown = latency;
+    }
   }
 };
 
@@ -36,8 +60,8 @@ double sc_time_stamp() { return 0; }
 
 extern "C" {
 
-Harness* tritium_harness_create(size_t global_bytes) {
-  auto* harness = new Harness(global_bytes);
+Harness* tritium_harness_create(size_t global_bytes, uint32_t latency) {
+  auto* harness = new Harness(global_bytes, latency);
   harness->model->reset = 1;
   for (int cycle = 0; cycle < 4; cycle++) harness->tick();
   harness->model->reset = 0;
