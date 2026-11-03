@@ -49,6 +49,16 @@ module decoder
         decoded.kind = KIND_STORE;
         decoded.width = 3'(opcode - 6'h1A);
       end
+      6'h20, 6'h21, 6'h22, 6'h23: begin
+        decoded.kind = KIND_BRANCH;
+        decoded.condition = opcode[1:0];
+      end
+      OPCODE_JUMP_AND_LINK: begin
+        decoded.kind = KIND_JUMP_AND_LINK;
+        decoded.immediate = {{11{word[20]}}, word[20:0]};
+      end
+      OPCODE_JUMP_AND_LINK_REGISTER: decoded.kind = KIND_JUMP_AND_LINK_REGISTER;
+      OPCODE_BARRIER: decoded.kind = KIND_BARRIER;
       OPCODE_EXIT: decoded.kind = KIND_EXIT;
       default: decoded.is_valid = 1'b0;
     endcase

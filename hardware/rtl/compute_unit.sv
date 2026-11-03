@@ -69,8 +69,15 @@ module compute_unit
   logic [4:0] destination;
 
   logic [31:0] program_counter;
+  logic [31:0] link_address;
   logic is_any_running;
+  logic is_any_at_barrier;
+  logic is_any_exited;
   logic [WARP_BITS-1:0] next_warp;
+  logic [LANES-1:0] is_taken;
+  logic [LANES-1:0][31:0] jump_targets;
+  logic is_branch_uniform;
+  logic is_jump_uniform;
 
   logic [LANES-1:0][31:0] read_data_a;
   logic [LANES-1:0][31:0] read_data_b;
@@ -86,6 +93,8 @@ module compute_unit
   logic [31:0] loaded_value;
 
   assign program_counter = program_counters[warp];
+  assign link_address = program_counter + 1;
+  assign is_branch_uniform = is_taken == '0 || is_taken == '1;
   assign busy = state != STATE_IDLE;
   assign destination = instruction[25:21];
 
@@ -126,6 +135,14 @@ module compute_unit
     );
 
     always_comb begin
+      unique case (current.condition)
+        CONDITION_EQUAL: is_taken[index] = read_data_a[index] == read_data_b[index];
+        CONDITION_NOT_EQUAL: is_taken[index] = read_data_a[index] != read_data_b[index];
+        CONDITION_LESS_THAN:
+        is_taken[index] = $signed(read_data_a[index]) < $signed(read_data_b[index]);
+        default: is_taken[index] = $signed(read_data_a[index]) >= $signed(read_data_b[index]);
+      endcase
+      jump_targets[index] = read_data_b[index] + current.immediate;
       unique case (current.special)
         SPECIAL_THREAD_INDEX: special = 32'(warp) * LANES + index;
         SPECIAL_BLOCK_INDEX: special = block_index;
@@ -137,20 +154,33 @@ module compute_unit
       unique case (current.kind)
         KIND_LOAD_UPPER: lane_results[index] = current.immediate;
         KIND_READ_SPECIAL: lane_results[index] = special;
+        KIND_JUMP_AND_LINK, KIND_JUMP_AND_LINK_REGISTER: lane_results[index] = link_address;
         default: lane_results[index] = alu_result;
       endcase
     end
   end
 
   always_comb begin
+    is_jump_uniform = 1'b1;
+    for (int index = 1; index < LANES; index++)
+      if (jump_targets[index] != jump_targets[0]) is_jump_uniform = 1'b0;
+  end
+
+  always_comb begin
     is_any_running = 1'b0;
+    is_any_at_barrier = 1'b0;
+    is_any_exited = 1'b0;
     next_warp = warp;
     for (int offset = MAX_WARPS; offset >= 1; offset--) begin
       logic [WARP_BITS-1:0] candidate;
       candidate = warp + WARP_BITS'(offset);
-      if ({1'b0, candidate} < warp_count && warp_status[candidate] == WARP_RUNNING) begin
-        is_any_running = 1'b1;
-        next_warp = candidate;
+      if ({1'b0, candidate} < warp_count) begin
+        if (warp_status[candidate] == WARP_RUNNING) begin
+          is_any_running = 1'b1;
+          next_warp = candidate;
+        end
+        if (warp_status[candidate] == WARP_AT_BARRIER) is_any_at_barrier = 1'b1;
+        if (warp_status[candidate] == WARP_EXITED) is_any_exited = 1'b1;
       end
     end
   end
@@ -198,7 +228,9 @@ module compute_unit
       end
       STATE_EXECUTE: begin
         if (destination != 0 && current.kind inside {KIND_REGISTER, KIND_IMMEDIATE,
-            KIND_LOAD_UPPER, KIND_READ_SPECIAL})
+            KIND_LOAD_UPPER, KIND_READ_SPECIAL, KIND_JUMP_AND_LINK})
+          write_enable = '1;
+        if (destination != 0 && current.kind == KIND_JUMP_AND_LINK_REGISTER && is_jump_uniform)
           write_enable = '1;
       end
       STATE_MEMORY_WAIT: begin
@@ -253,6 +285,11 @@ module compute_unit
           if (is_any_running) begin
             warp <= next_warp;
             state <= STATE_FETCH;
+          end else if (is_any_at_barrier && is_any_exited) begin
+            raise(FAULT_BARRIER_DEADLOCK, '0);
+          end else if (is_any_at_barrier) begin
+            for (int index = 0; index < MAX_WARPS; index++)
+              if (warp_status[index] == WARP_AT_BARRIER) warp_status[index] <= WARP_RUNNING;
           end else begin
             state <= STATE_IDLE;
           end
@@ -274,11 +311,25 @@ module compute_unit
               lane <= '0;
               state <= STATE_MEMORY_ADDRESS;
             end
+            KIND_BRANCH: begin
+              if (!is_branch_uniform) raise(FAULT_DIVERGENT_BRANCH, '0);
+              else if (is_taken[0]) finish_instruction(program_counter + current.immediate);
+              else finish_instruction(link_address);
+            end
+            KIND_JUMP_AND_LINK: finish_instruction(program_counter + current.immediate);
+            KIND_JUMP_AND_LINK_REGISTER: begin
+              if (!is_jump_uniform) raise(FAULT_DIVERGENT_BRANCH, '0);
+              else finish_instruction(jump_targets[0]);
+            end
+            KIND_BARRIER: begin
+              warp_status[warp] <= WARP_AT_BARRIER;
+              finish_instruction(link_address);
+            end
             KIND_EXIT: begin
               warp_status[warp] <= WARP_EXITED;
-              finish_instruction(program_counter + 1);
+              finish_instruction(link_address);
             end
-            default: finish_instruction(program_counter + 1);
+            default: finish_instruction(link_address);
           endcase
         end
         STATE_MEMORY_ADDRESS: begin
@@ -302,7 +353,7 @@ module compute_unit
         STATE_MEMORY_WAIT: begin
           if (memory_response) begin
             lane <= lane + 1;
-            if (lane == '1) finish_instruction(program_counter + 1);
+            if (lane == '1) finish_instruction(link_address);
             else state <= STATE_MEMORY_ADDRESS;
           end
         end

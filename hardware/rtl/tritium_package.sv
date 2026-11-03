@@ -100,6 +100,11 @@ package tritium_package;
   localparam logic [2:0] SPECIAL_LANE_INDEX = 3'd4;
   localparam logic [2:0] SPECIAL_WARP_INDEX = 3'd5;
 
+  localparam logic [1:0] CONDITION_EQUAL = 2'd0;
+  localparam logic [1:0] CONDITION_NOT_EQUAL = 2'd1;
+  localparam logic [1:0] CONDITION_LESS_THAN = 2'd2;
+  localparam logic [1:0] CONDITION_GREATER_OR_EQUAL = 2'd3;
+
   typedef struct packed {
     logic is_valid;
     kind_t kind;
@@ -107,6 +112,7 @@ package tritium_package;
     logic [31:0] immediate;
     logic [2:0] width;
     logic [2:0] special;
+    logic [1:0] condition;
   } decoded_t;
 
 endpackage

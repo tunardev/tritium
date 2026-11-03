@@ -1,9 +1,8 @@
-use tritium_assembler::assemble;
-use tritium_isa::{Fault, LaunchConfig, LaunchReport};
-use tritium_rtl::RtlDevice;
-use tritium_simulator::Device;
+mod support;
 
-const ONE_WARP: LaunchConfig = LaunchConfig { grid_blocks: 1, block_threads: 16, shared_bytes: 0 };
+use support::{ONE_WARP, assert_matches_simulator};
+use tritium_isa::{Fault, LaunchConfig};
+use tritium_rtl::RtlDevice;
 
 fn pseudo_random_bytes(seed: u32, count: usize) -> Vec<u8> {
     let mut state = seed;
@@ -13,28 +12,6 @@ fn pseudo_random_bytes(seed: u32, count: usize) -> Vec<u8> {
             (state >> 24) as u8
         })
         .collect()
-}
-
-fn assert_matches_simulator(
-    source: &str,
-    config: LaunchConfig,
-    arguments: &[u32],
-    memory: &[u8],
-) -> Result<LaunchReport, Fault> {
-    let program = assemble(source).unwrap();
-    let mut simulator = Device::new(memory.len());
-    simulator.global_mut().copy_from_slice(memory);
-    let mut rtl = RtlDevice::new(memory.len());
-    rtl.global_mut().copy_from_slice(memory);
-
-    let expected = simulator.launch(&program, config, arguments);
-    let actual = rtl.launch(&program, config, arguments);
-
-    assert_eq!(actual, expected);
-    if expected.is_ok() {
-        assert!(rtl.global() == simulator.global(), "global memory differs");
-    }
-    actual
 }
 
 #[test]
@@ -112,6 +89,39 @@ fn subword_accesses_match_simulator() {
                   sw r15, 8(r17)\nsh r16, 12(r17)\nadd r18, r3, r10\nsb r15, 0(r18)\nexit";
     let memory = pseudo_random_bytes(3, 1024);
     assert_matches_simulator(source, ONE_WARP, &[0, 256, 768], &memory).unwrap();
+}
+
+#[test]
+fn backward_jumps_repeat_loops() {
+    let source = "li r10, 0\nli r11, 5\nloop:\nbeq r10, r11, done\naddi r10, r10, 1\nj loop\n\
+                  done:\nsreg r12, lane_index\nslli r12, r12, 2\nsw r10, 0(r12)\nexit";
+    assert_matches_simulator(source, ONE_WARP, &[], &[0; 64]).unwrap();
+}
+
+#[test]
+fn calls_return_through_link_register() {
+    let source = "li r10, 3\njal r31, triple\njal r31, triple\nsreg r12, lane_index\n\
+                  slli r12, r12, 2\nsw r10, 0(r12)\nexit\n\
+                  triple:\nadd r11, r10, r10\nadd r10, r10, r11\njalr r0, r31, 0";
+    assert_matches_simulator(source, ONE_WARP, &[], &[0; 64]).unwrap();
+}
+
+#[test]
+fn signed_branches_compare_negative_values() {
+    let source = "li r10, -1\nli r11, 1\nli r12, 0\nblt r10, r11, less\naddi r12, r12, 1\n\
+                  less:\nbge r10, r11, greater\naddi r12, r12, 2\ngreater:\n\
+                  bne r10, r11, different\naddi r12, r12, 4\ndifferent:\n\
+                  sreg r13, lane_index\nslli r13, r13, 2\nsw r12, 0(r13)\nexit";
+    assert_matches_simulator(source, ONE_WARP, &[], &[0; 64]).unwrap();
+}
+
+#[test]
+fn barrier_synchronizes_four_warps() {
+    let source = "sreg r10, thread_index\nslli r11, r10, 2\naddi r12, r10, 100\nsw r12, 0(r11)\n\
+                  bar\naddi r13, r10, 16\nandi r13, r13, 63\nslli r13, r13, 2\nlw r14, 0(r13)\n\
+                  add r14, r14, r12\nsw r14, 256(r11)\nexit";
+    let config = LaunchConfig { grid_blocks: 1, block_threads: 64, shared_bytes: 0 };
+    assert_matches_simulator(source, config, &[], &[0; 512]).unwrap();
 }
 
 #[test]
