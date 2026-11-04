@@ -10,6 +10,7 @@ const MEMORY_LATENCY: u32 = 4;
 const HOST_STATUS: u32 = 0;
 const HOST_GRID_BLOCKS: u32 = 1;
 const HOST_BLOCK_THREADS: u32 = 2;
+const HOST_SHARED_BYTES: u32 = 3;
 const HOST_ARGUMENT_COUNT: u32 = 4;
 const HOST_GLOBAL_BYTES: u32 = 5;
 const HOST_PROGRAM_LENGTH: u32 = 6;
@@ -101,6 +102,7 @@ impl RtlDevice {
         self.write(HOST_PROGRAM_LENGTH, program.len() as u32);
         self.write(HOST_GRID_BLOCKS, config.grid_blocks);
         self.write(HOST_BLOCK_THREADS, config.block_threads);
+        self.write(HOST_SHARED_BYTES, config.shared_bytes);
         self.write(HOST_GLOBAL_BYTES, self.global_bytes as u32);
         self.write(HOST_ARGUMENT_COUNT, arguments.len() as u32);
         for (index, &argument) in arguments.iter().enumerate() {

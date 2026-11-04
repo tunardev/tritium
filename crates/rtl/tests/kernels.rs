@@ -125,6 +125,42 @@ fn barrier_synchronizes_four_warps() {
 }
 
 #[test]
+fn shared_memory_reduction_uses_barrier() {
+    let source = "sreg r10, thread_index\nsreg r11, block_index\nsreg r12, block_threads\n\
+                  mul16 r13, r11, r12\nadd r13, r13, r10\nslli r13, r13, 2\nadd r13, r1, r13\n\
+                  lw r14, 0(r13)\nslli r15, r10, 2\nsws r14, 0(r15)\nbar\nli r16, 32\n\
+                  loop:\nlws r17, 0(r15)\nadd r18, r10, r16\nandi r18, r18, 63\nslli r18, r18, 2\n\
+                  lws r19, 0(r18)\nbar\nadd r19, r17, r19\nslt r20, r10, r16\n\
+                  select r20, r19, r17\nsws r20, 0(r15)\nbar\nsrli r16, r16, 1\n\
+                  bne r16, r0, loop\nlws r21, 0(r0)\nslli r22, r11, 2\nadd r22, r2, r22\n\
+                  sw r21, 0(r22)\nexit";
+    let config = LaunchConfig { grid_blocks: 4, block_threads: 64, shared_bytes: 256 };
+    let memory = pseudo_random_bytes(4, 2048);
+    assert_matches_simulator(source, config, &[0, 1024], &memory).unwrap();
+}
+
+#[test]
+fn shared_subword_accesses_match_simulator() {
+    let source = "sreg r10, lane_index\nslli r11, r10, 2\nadd r12, r1, r11\nlw r13, 0(r12)\n\
+                  sws r13, 0(r11)\nadd r14, r11, r10\nshs r10, 2(r11)\nsbs r10, 64(r10)\n\
+                  lbs r15, 1(r11)\nlbus r16, 3(r11)\nlhs r17, 0(r11)\nlhus r18, 2(r11)\n\
+                  lws r19, 64(r0)\nslli r20, r10, 5\nadd r20, r2, r20\nsw r15, 0(r20)\n\
+                  sw r16, 4(r20)\nsw r17, 8(r20)\nsw r18, 12(r20)\nsw r19, 16(r20)\nexit";
+    let config = LaunchConfig { shared_bytes: 128, ..ONE_WARP };
+    let memory = pseudo_random_bytes(5, 1024);
+    assert_matches_simulator(source, config, &[0, 256], &memory).unwrap();
+}
+
+#[test]
+fn shared_memory_starts_zeroed() {
+    let source = "sreg r10, block_index\nsreg r11, lane_index\nslli r11, r11, 2\n\
+                  lws r12, 0(r11)\nslli r13, r10, 6\nadd r13, r13, r11\nsw r12, 0(r13)\n\
+                  addi r12, r10, 7\nsws r12, 0(r11)\nexit";
+    let config = LaunchConfig { grid_blocks: 3, block_threads: 16, shared_bytes: 4096 };
+    assert_matches_simulator(source, config, &[], &[0xAA; 256]).unwrap();
+}
+
+#[test]
 fn misaligned_word_load_faults() {
     let source = "sreg r10, lane_index\nslli r10, r10, 2\naddi r10, r10, 2\nlw r11, 0(r10)\nexit";
     let fault = assert_matches_simulator(source, ONE_WARP, &[], &[0; 256]).unwrap_err();

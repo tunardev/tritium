@@ -113,6 +113,7 @@ package tritium_package;
     logic [2:0] width;
     logic [2:0] special;
     logic [1:0] condition;
+    logic is_shared;
   } decoded_t;
 
 endpackage

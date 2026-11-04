@@ -52,6 +52,14 @@ fn barrier_after_warp_exit_deadlocks() {
 }
 
 #[test]
+fn shared_access_past_allocation_faults() {
+    let config = LaunchConfig { shared_bytes: 64, ..ONE_WARP };
+    let fault =
+        run("sreg r1, lane_index\nslli r1, r1, 2\naddi r1, r1, 4\nlws r2, 0(r1)\nexit", config);
+    assert!(matches!(fault, Fault::AddressOutOfRange { address: 64, .. }), "{fault:?}");
+}
+
+#[test]
 fn unknown_special_register_faults() {
     let word = (0x0A << 26) | (1 << 21) | 6;
     let mut device = RtlDevice::new(64);

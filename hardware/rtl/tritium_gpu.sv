@@ -21,6 +21,7 @@ module tritium_gpu
   logic [31:0] grid_blocks;
   logic [31:0] block_threads;
   logic [31:0] global_bytes;
+  logic [31:0] shared_bytes;
   logic [3:0] argument_count;
   logic [MAX_ARGUMENTS-1:0][31:0] arguments;
   logic [31:0] program_length;
@@ -63,6 +64,7 @@ module tritium_gpu
       .grid_blocks(grid_blocks),
       .block_threads(block_threads),
       .global_bytes(global_bytes),
+      .shared_bytes(shared_bytes),
       .program_length(program_length),
       .argument_count(argument_count),
       .arguments(arguments),
@@ -106,6 +108,7 @@ module tritium_gpu
           HOST_BLOCK_THREADS: block_threads <= host_write_data;
           HOST_ARGUMENT_COUNT: argument_count <= host_write_data[3:0];
           HOST_GLOBAL_BYTES: global_bytes <= host_write_data;
+          HOST_SHARED_BYTES: shared_bytes <= host_write_data;
           HOST_PROGRAM_LENGTH: program_length <= host_write_data;
           HOST_STEP_LIMIT_LOW: step_limit[31:0] <= host_write_data;
           HOST_STEP_LIMIT_HIGH: step_limit[63:32] <= host_write_data;

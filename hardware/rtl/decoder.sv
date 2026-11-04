@@ -45,9 +45,19 @@ module decoder
         decoded.kind = KIND_LOAD;
         decoded.width = 3'(opcode - 6'h10);
       end
+      6'h15, 6'h16, 6'h17, 6'h18, 6'h19: begin
+        decoded.kind = KIND_LOAD;
+        decoded.width = 3'(opcode - 6'h15);
+        decoded.is_shared = 1'b1;
+      end
       6'h1A, 6'h1B, 6'h1C: begin
         decoded.kind = KIND_STORE;
         decoded.width = 3'(opcode - 6'h1A);
+      end
+      6'h1D, 6'h1E, 6'h1F: begin
+        decoded.kind = KIND_STORE;
+        decoded.width = 3'(opcode - 6'h1D);
+        decoded.is_shared = 1'b1;
       end
       6'h20, 6'h21, 6'h22, 6'h23: begin
         decoded.kind = KIND_BRANCH;

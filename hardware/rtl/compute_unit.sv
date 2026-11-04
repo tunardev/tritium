@@ -13,6 +13,7 @@ module compute_unit
     input logic [                  31:0]       grid_blocks,
     input logic [                  31:0]       block_threads,
     input logic [                  31:0]       global_bytes,
+    input logic [                  31:0]       shared_bytes,
     input logic [                  31:0]       program_length,
     input logic [                   3:0]       argument_count,
     input logic [MAX_ARGUMENTS-1:0][31:0]       arguments,
@@ -59,7 +60,8 @@ module compute_unit
   logic [31:0] program_counters[MAX_WARPS];
   logic [WARP_BITS-1:0] warp;
   logic [WARP_BITS:0] warp_count;
-  logic [REGISTER_ADDRESS_BITS-1:0] initialize_index;
+  logic [SHARED_BITS:0] initialize_index;
+  logic [SHARED_BITS:0] initialize_count;
   logic [$clog2(LANES)-1:0] lane;
 
   logic [31:0] program_memory[PROGRAM_WORDS];
@@ -88,7 +90,15 @@ module compute_unit
   logic [LANES-1:0][31:0] lane_results;
 
   logic [31:0] lane_address;
+  logic [31:0] space_bytes;
   logic [2:0] access_bytes;
+  logic [3:0] byte_enable;
+  logic is_access_complete;
+  logic [31:0] access_read_data;
+  logic [SHARED_BITS-1:0] shared_address;
+  logic [3:0] shared_write_enable;
+  logic [31:0] shared_write_data;
+  logic [31:0] shared_read_data;
   logic [31:0] shifted_read_data;
   logic [31:0] loaded_value;
 
@@ -120,6 +130,14 @@ module compute_unit
       .write_enable(write_enable),
       .write_address(write_address),
       .write_data(write_data)
+  );
+
+  shared_memory shared_memory (
+      .clock(clock),
+      .address(shared_address),
+      .write_enable(shared_write_enable),
+      .write_data(shared_write_data),
+      .read_data(shared_read_data)
   );
 
   for (genvar index = 0; index < LANES; index++) begin : gen_lanes
@@ -200,7 +218,15 @@ module compute_unit
         default: access_bytes = 3'd1;
       endcase
     end
-    shifted_read_data = memory_read_data >> {lane_address[1:0], 3'b0};
+    unique case (access_bytes)
+      3'd4: byte_enable = 4'b1111;
+      3'd2: byte_enable = 4'b0011 << lane_address[1:0];
+      default: byte_enable = 4'b0001 << lane_address[1:0];
+    endcase
+    space_bytes = current.is_shared ? shared_bytes : global_bytes;
+    is_access_complete = current.is_shared || memory_response;
+    access_read_data = current.is_shared ? shared_read_data : memory_read_data;
+    shifted_read_data = access_read_data >> {lane_address[1:0], 3'b0};
     unique case (current.width)
       WIDTH_HALF: loaded_value = {{16{shifted_read_data[15]}}, shifted_read_data[15:0]};
       WIDTH_HALF_UNSIGNED: loaded_value = {16'b0, shifted_read_data[15:0]};
@@ -211,6 +237,18 @@ module compute_unit
   end
 
   always_comb begin
+    shared_address = lane_address[SHARED_BITS+1:2];
+    shared_write_enable = '0;
+    shared_write_data = read_data_a[lane] << {lane_address[1:0], 3'b0};
+    if (state == STATE_INITIALIZE) begin
+      shared_address = initialize_index[SHARED_BITS-1:0];
+      shared_write_enable = '1;
+      shared_write_data = '0;
+    end else if (state == STATE_MEMORY_ADDRESS && current.is_shared && current.kind == KIND_STORE)
+      shared_write_enable = byte_enable;
+  end
+
+  always_comb begin
     write_enable = '0;
     write_address = {warp, destination};
     write_data = lane_results;
@@ -218,8 +256,8 @@ module compute_unit
       STATE_INITIALIZE: begin
         logic [REGISTER_BITS-1:0] register_index;
         register_index = initialize_index[REGISTER_BITS-1:0];
-        write_enable = '1;
-        write_address = initialize_index;
+        write_enable = {LANES{initialize_index < 2 ** REGISTER_ADDRESS_BITS}};
+        write_address = initialize_index[REGISTER_ADDRESS_BITS-1:0];
         for (int index = 0; index < LANES; index++) begin
           write_data[index] = '0;
           if (register_index != 0 && 4'(register_index) <= argument_count)
@@ -234,7 +272,7 @@ module compute_unit
           write_enable = '1;
       end
       STATE_MEMORY_WAIT: begin
-        if (memory_response && current.kind == KIND_LOAD && destination != 0)
+        if (is_access_complete && current.kind == KIND_LOAD && destination != 0)
           write_enable[lane] = 1'b1;
         write_data = {LANES{loaded_value}};
       end
@@ -274,12 +312,15 @@ module compute_unit
             end
             warp <= WARP_BITS'(MAX_WARPS - 1);
             initialize_index <= '0;
+            initialize_count <= (SHARED_BITS + 1)'((shared_bytes + 3) / 4);
+            if ((shared_bytes + 3) / 4 < 2 ** REGISTER_ADDRESS_BITS)
+              initialize_count <= 2 ** REGISTER_ADDRESS_BITS;
             state <= STATE_INITIALIZE;
           end
         end
         STATE_INITIALIZE: begin
           initialize_index <= initialize_index + 1;
-          if (initialize_index == '1) state <= STATE_SELECT;
+          if (initialize_index == initialize_count - 1) state <= STATE_SELECT;
         end
         STATE_SELECT: begin
           if (is_any_running) begin
@@ -335,23 +376,21 @@ module compute_unit
         STATE_MEMORY_ADDRESS: begin
           if ((lane_address & 32'(access_bytes - 1)) != 0)
             raise(FAULT_MISALIGNED_ACCESS, lane_address);
-          else if ({1'b0, lane_address} + 33'(access_bytes) > {1'b0, global_bytes})
+          else if ({1'b0, lane_address} + 33'(access_bytes) > {1'b0, space_bytes})
             raise(FAULT_ADDRESS_OUT_OF_RANGE, lane_address);
-          else begin
+          else if (current.is_shared) begin
+            state <= STATE_MEMORY_WAIT;
+          end else begin
             memory_request <= 1'b1;
             memory_write <= current.kind == KIND_STORE;
             memory_address <= {lane_address[31:2], 2'b0};
             memory_write_data <= read_data_a[lane] << {lane_address[1:0], 3'b0};
-            unique case (access_bytes)
-              3'd4: memory_byte_enable <= 4'b1111;
-              3'd2: memory_byte_enable <= 4'b0011 << lane_address[1:0];
-              default: memory_byte_enable <= 4'b0001 << lane_address[1:0];
-            endcase
+            memory_byte_enable <= byte_enable;
             state <= STATE_MEMORY_WAIT;
           end
         end
         STATE_MEMORY_WAIT: begin
-          if (memory_response) begin
+          if (is_access_complete) begin
             lane <= lane + 1;
             if (lane == '1) finish_instruction(link_address);
             else state <= STATE_MEMORY_ADDRESS;
