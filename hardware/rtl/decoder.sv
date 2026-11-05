@@ -21,7 +21,8 @@ module decoder
       OPCODE_REGISTER: begin
         decoded.kind = KIND_REGISTER;
         decoded.operation = word[4:0];
-        decoded.is_valid = word[10:0] <= 11'(FUNCTION_SELECT) || word[10:0] == 11'(FUNCTION_SATURATE_INT8);
+        decoded.is_valid = word[10:0] <= 11'(FUNCTION_TERNARY_DOT)
+            || word[10:0] == 11'(FUNCTION_SATURATE_INT8);
       end
       6'h01, 6'h08: begin
         decoded.kind = KIND_IMMEDIATE;

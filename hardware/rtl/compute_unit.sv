@@ -38,7 +38,7 @@ module compute_unit
 
   localparam int REGISTER_ADDRESS_BITS = WARP_BITS + REGISTER_BITS;
 
-  typedef enum logic [2:0] {
+  typedef enum logic [3:0] {
     STATE_IDLE,
     STATE_INITIALIZE,
     STATE_SELECT,
@@ -46,7 +46,12 @@ module compute_unit
     STATE_DECODE,
     STATE_EXECUTE,
     STATE_MEMORY_ADDRESS,
-    STATE_MEMORY_WAIT
+    STATE_MEMORY_WAIT,
+    STATE_DOT_ADDRESS,
+    STATE_DOT_WEIGHTS,
+    STATE_DOT_READ,
+    STATE_DOT_CAPTURE,
+    STATE_DOT_WRITE
   } state_t;
 
   typedef enum logic [1:0] {
@@ -62,6 +67,7 @@ module compute_unit
   logic [WARP_BITS:0] warp_count;
   logic [SHARED_BITS:0] initialize_index;
   logic [SHARED_BITS:0] initialize_count;
+  logic [REGISTER_BITS-1:0] initialize_register;
   logic [$clog2(LANES)-1:0] lane;
 
   logic [31:0] program_memory[PROGRAM_WORDS];
@@ -99,11 +105,21 @@ module compute_unit
   logic [3:0] shared_write_enable;
   logic [31:0] shared_write_data;
   logic [31:0] shared_read_data;
+
+  logic [31:0] dot_weights;
+  logic [5:0][31:0] dot_words;
+  logic [2:0] dot_word;
+  logic [SHARED_BITS-1:0] dot_word_address;
+  logic [19:0][7:0] dot_activations;
+  logic [31:0] dot_sum;
+  logic [31:0] dot_result;
+  logic is_serial;
   logic [31:0] shifted_read_data;
   logic [31:0] loaded_value;
 
   assign program_counter = program_counters[warp];
   assign link_address = program_counter + 1;
+  assign initialize_register = initialize_index[REGISTER_BITS-1:0];
   assign is_branch_uniform = is_taken == '0 || is_taken == '1;
   assign busy = state != STATE_IDLE;
   assign destination = instruction[25:21];
@@ -138,6 +154,17 @@ module compute_unit
       .write_enable(shared_write_enable),
       .write_data(shared_write_data),
       .read_data(shared_read_data)
+  );
+
+  assign dot_word_address = read_data_c[lane][SHARED_BITS+1:2] + SHARED_BITS'(dot_word);
+  assign dot_activations = 160'(dot_words >> {read_data_c[lane][1:0], 3'b0});
+  assign dot_result = read_data_a[lane] + dot_sum;
+  assign is_serial = current.kind == KIND_REGISTER && current.operation == FUNCTION_TERNARY_DOT;
+
+  ternary_dot ternary_dot (
+      .weights(dot_weights),
+      .activations(dot_activations),
+      .sum(dot_sum)
   );
 
   for (genvar index = 0; index < LANES; index++) begin : gen_lanes
@@ -246,6 +273,7 @@ module compute_unit
       shared_write_data = '0;
     end else if (state == STATE_MEMORY_ADDRESS && current.is_shared && current.kind == KIND_STORE)
       shared_write_enable = byte_enable;
+    else if (state == STATE_DOT_READ) shared_address = dot_word_address;
   end
 
   always_comb begin
@@ -254,18 +282,16 @@ module compute_unit
     write_data = lane_results;
     unique case (state)
       STATE_INITIALIZE: begin
-        logic [REGISTER_BITS-1:0] register_index;
-        register_index = initialize_index[REGISTER_BITS-1:0];
         write_enable = {LANES{initialize_index < 2 ** REGISTER_ADDRESS_BITS}};
         write_address = initialize_index[REGISTER_ADDRESS_BITS-1:0];
         for (int index = 0; index < LANES; index++) begin
           write_data[index] = '0;
-          if (register_index != 0 && 4'(register_index) <= argument_count)
-            write_data[index] = arguments[register_index-1];
+          if (initialize_register != 0 && 4'(initialize_register) <= argument_count)
+            write_data[index] = arguments[initialize_register-1];
         end
       end
       STATE_EXECUTE: begin
-        if (destination != 0 && current.kind inside {KIND_REGISTER, KIND_IMMEDIATE,
+        if (destination != 0 && !is_serial && current.kind inside {KIND_REGISTER, KIND_IMMEDIATE,
             KIND_LOAD_UPPER, KIND_READ_SPECIAL, KIND_JUMP_AND_LINK})
           write_enable = '1;
         if (destination != 0 && current.kind == KIND_JUMP_AND_LINK_REGISTER && is_jump_uniform)
@@ -275,6 +301,10 @@ module compute_unit
         if (is_access_complete && current.kind == KIND_LOAD && destination != 0)
           write_enable[lane] = 1'b1;
         write_data = {LANES{loaded_value}};
+      end
+      STATE_DOT_WRITE: begin
+        write_enable[lane] = destination != 0;
+        write_data = {LANES{dot_result}};
       end
       default: ;
     endcase
@@ -352,6 +382,11 @@ module compute_unit
               lane <= '0;
               state <= STATE_MEMORY_ADDRESS;
             end
+            KIND_REGISTER: begin
+              lane <= '0;
+              if (is_serial) state <= STATE_DOT_ADDRESS;
+              else finish_instruction(link_address);
+            end
             KIND_BRANCH: begin
               if (!is_branch_uniform) raise(FAULT_DIVERGENT_BRANCH, '0);
               else if (is_taken[0]) finish_instruction(program_counter + current.immediate);
@@ -395,6 +430,38 @@ module compute_unit
             if (lane == '1) finish_instruction(link_address);
             else state <= STATE_MEMORY_ADDRESS;
           end
+        end
+        STATE_DOT_ADDRESS: begin
+          if (read_data_b[lane][1:0] != 0) raise(FAULT_MISALIGNED_ACCESS, read_data_b[lane]);
+          else if ({1'b0, read_data_b[lane]} + 33'd4 > {1'b0, global_bytes})
+            raise(FAULT_ADDRESS_OUT_OF_RANGE, read_data_b[lane]);
+          else if ({1'b0, read_data_c[lane]} + 33'd20 > {1'b0, shared_bytes})
+            raise(FAULT_ADDRESS_OUT_OF_RANGE, read_data_c[lane]);
+          else begin
+            memory_request <= 1'b1;
+            memory_write <= 1'b0;
+            memory_address <= read_data_b[lane];
+            memory_byte_enable <= 4'b0000;
+            state <= STATE_DOT_WEIGHTS;
+          end
+        end
+        STATE_DOT_WEIGHTS: begin
+          if (memory_response) begin
+            dot_weights <= memory_read_data;
+            dot_word <= '0;
+            state <= STATE_DOT_READ;
+          end
+        end
+        STATE_DOT_READ: state <= STATE_DOT_CAPTURE;
+        STATE_DOT_CAPTURE: begin
+          dot_words[dot_word] <= shared_read_data;
+          dot_word <= dot_word + 1;
+          state <= dot_word == 3'd5 ? STATE_DOT_WRITE : STATE_DOT_READ;
+        end
+        STATE_DOT_WRITE: begin
+          lane <= lane + 1;
+          if (lane == '1) finish_instruction(link_address);
+          else state <= STATE_DOT_ADDRESS;
         end
         default: state <= STATE_IDLE;
       endcase

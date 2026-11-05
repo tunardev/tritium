@@ -27,7 +27,15 @@ pub fn assert_matches_simulator(
 
     assert_eq!(actual, expected);
     if expected.is_ok() {
-        assert!(rtl.global() == simulator.global(), "global memory differs");
+        let difference = rtl.global().iter().zip(simulator.global()).position(|(a, b)| a != b);
+        if let Some(address) = difference {
+            let word = address & !3;
+            panic!(
+                "global memory differs at {address:#x}: rtl {:02x?}, simulator {:02x?}",
+                &rtl.global()[word..(word + 4).min(memory.len())],
+                &simulator.global()[word..(word + 4).min(memory.len())]
+            );
+        }
     }
     actual
 }

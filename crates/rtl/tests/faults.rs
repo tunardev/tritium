@@ -60,6 +60,20 @@ fn shared_access_past_allocation_faults() {
 }
 
 #[test]
+fn misaligned_dot_weights_fault() {
+    let config = LaunchConfig { shared_bytes: 64, ..ONE_WARP };
+    let fault = run("li r1, 6\ntdot r2, r1, r0\nexit", config);
+    assert!(matches!(fault, Fault::MisalignedAccess { address: 6, .. }), "{fault:?}");
+}
+
+#[test]
+fn dot_activations_past_allocation_fault() {
+    let config = LaunchConfig { shared_bytes: 64, ..ONE_WARP };
+    let fault = run("li r1, 45\ntdot r2, r0, r1\nexit", config);
+    assert!(matches!(fault, Fault::AddressOutOfRange { address: 45, .. }), "{fault:?}");
+}
+
+#[test]
 fn unknown_special_register_faults() {
     let word = (0x0A << 26) | (1 << 21) | 6;
     let mut device = RtlDevice::new(64);
