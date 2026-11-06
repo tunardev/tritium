@@ -51,7 +51,9 @@ module compute_unit
     STATE_DOT_WEIGHTS,
     STATE_DOT_READ,
     STATE_DOT_CAPTURE,
-    STATE_DOT_WRITE
+    STATE_DOT_WRITE,
+    STATE_FIXED_START,
+    STATE_FIXED_WAIT
   } state_t;
 
   typedef enum logic [1:0] {
@@ -114,6 +116,8 @@ module compute_unit
   logic [31:0] dot_sum;
   logic [31:0] dot_result;
   logic is_serial;
+  logic fixed_done;
+  logic [31:0] fixed_result;
   logic [31:0] shifted_read_data;
   logic [31:0] loaded_value;
 
@@ -159,7 +163,19 @@ module compute_unit
   assign dot_word_address = read_data_c[lane][SHARED_BITS+1:2] + SHARED_BITS'(dot_word);
   assign dot_activations = 160'(dot_words >> {read_data_c[lane][1:0], 3'b0});
   assign dot_result = read_data_a[lane] + dot_sum;
-  assign is_serial = current.kind == KIND_REGISTER && current.operation == FUNCTION_TERNARY_DOT;
+  assign is_serial = current.kind == KIND_REGISTER && current.operation inside {
+      FUNCTION_TERNARY_DOT, FUNCTION_SCALE, FUNCTION_EXP2, FUNCTION_RECIPROCAL_SQUARE_ROOT};
+
+  fixed_point_unit fixed_point_unit (
+      .clock(clock),
+      .reset(reset),
+      .start(state == STATE_FIXED_START),
+      .operation(current.operation),
+      .left(read_data_b[lane]),
+      .right(read_data_c[lane]),
+      .done(fixed_done),
+      .result(fixed_result)
+  );
 
   ternary_dot ternary_dot (
       .weights(dot_weights),
@@ -306,6 +322,10 @@ module compute_unit
         write_enable[lane] = destination != 0;
         write_data = {LANES{dot_result}};
       end
+      STATE_FIXED_WAIT: begin
+        write_enable[lane] = fixed_done && destination != 0;
+        write_data = {LANES{fixed_result}};
+      end
       default: ;
     endcase
   end
@@ -384,8 +404,9 @@ module compute_unit
             end
             KIND_REGISTER: begin
               lane <= '0;
-              if (is_serial) state <= STATE_DOT_ADDRESS;
-              else finish_instruction(link_address);
+              if (!is_serial) finish_instruction(link_address);
+              else if (current.operation == FUNCTION_TERNARY_DOT) state <= STATE_DOT_ADDRESS;
+              else state <= STATE_FIXED_START;
             end
             KIND_BRANCH: begin
               if (!is_branch_uniform) raise(FAULT_DIVERGENT_BRANCH, '0);
@@ -462,6 +483,14 @@ module compute_unit
           lane <= lane + 1;
           if (lane == '1) finish_instruction(link_address);
           else state <= STATE_DOT_ADDRESS;
+        end
+        STATE_FIXED_START: state <= STATE_FIXED_WAIT;
+        STATE_FIXED_WAIT: begin
+          if (fixed_done) begin
+            lane <= lane + 1;
+            if (lane == '1) finish_instruction(link_address);
+            else state <= STATE_FIXED_START;
+          end
         end
         default: state <= STATE_IDLE;
       endcase

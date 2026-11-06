@@ -172,6 +172,25 @@ fn ternary_dot_matches_simulator() {
 }
 
 #[test]
+fn fixed_point_operations_match_simulator() {
+    let source = "sreg r10, lane_index\nslli r11, r10, 3\nadd r11, r1, r11\nlw r12, 0(r11)\n\
+                  lw r13, 4(r11)\nslli r20, r10, 4\nadd r20, r2, r20\nscale r14, r12, r13\n\
+                  sw r14, 0(r20)\nexp2 r14, r12, r0\nsw r14, 4(r20)\nrsqrt r14, r12, r0\n\
+                  sw r14, 8(r20)\nsrai r15, r12, 12\nexp2 r14, r15, r0\nsw r14, 12(r20)\nexit";
+    let mut memory = pseudo_random_bytes(7, 512);
+    let extremes: [u32; 12] = [0, 0, 1, 1, 0x8000_0000, 0x8000_0000, 0x7FFF_FFFF, 0x7FFF_FFFF]
+        .into_iter()
+        .chain([0xFFFF_0000, 65536, 0xFFFF_FFFF, 0x0001_0000])
+        .collect::<Vec<_>>()
+        .try_into()
+        .unwrap();
+    for (index, value) in extremes.iter().enumerate() {
+        memory[4 * index..][..4].copy_from_slice(&value.to_le_bytes());
+    }
+    assert_matches_simulator(source, ONE_WARP, &[0, 256], &memory).unwrap();
+}
+
+#[test]
 fn misaligned_word_load_faults() {
     let source = "sreg r10, lane_index\nslli r10, r10, 2\naddi r10, r10, 2\nlw r11, 0(r10)\nexit";
     let fault = assert_matches_simulator(source, ONE_WARP, &[], &[0; 256]).unwrap_err();
