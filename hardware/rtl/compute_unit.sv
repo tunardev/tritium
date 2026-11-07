@@ -112,6 +112,7 @@ module compute_unit
   logic [5:0][31:0] dot_words;
   logic [2:0] dot_word;
   logic [SHARED_BITS-1:0] dot_word_address;
+  logic [191:0] dot_window;
   logic [19:0][7:0] dot_activations;
   logic [31:0] dot_sum;
   logic [31:0] dot_result;
@@ -161,7 +162,8 @@ module compute_unit
   );
 
   assign dot_word_address = read_data_c[lane][SHARED_BITS+1:2] + SHARED_BITS'(dot_word);
-  assign dot_activations = 160'(dot_words >> {read_data_c[lane][1:0], 3'b0});
+  assign dot_window = dot_words >> {read_data_c[lane][1:0], 3'b0};
+  assign dot_activations = dot_window[159:0];
   assign dot_result = read_data_a[lane] + dot_sum;
   assign is_serial = current.kind == KIND_REGISTER && current.operation inside {
       FUNCTION_TERNARY_DOT, FUNCTION_SCALE, FUNCTION_EXP2, FUNCTION_RECIPROCAL_SQUARE_ROOT};

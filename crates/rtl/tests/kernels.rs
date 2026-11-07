@@ -172,6 +172,17 @@ fn ternary_dot_matches_simulator() {
 }
 
 #[test]
+fn ternary_dot_matches_unaligned_activations() {
+    let source = "sreg r10, lane_index\nslli r11, r10, 3\nadd r12, r2, r11\nlw r13, 0(r12)\n\
+                  lw r14, 4(r12)\nsws r13, 0(r11)\nsws r14, 4(r11)\nbar\nslli r15, r10, 2\n\
+                  add r16, r1, r15\nmov r17, r16\ntdot r17, r16, r10\naddi r18, r10, 90\n\
+                  tdot r17, r16, r18\nadd r19, r3, r15\nsw r17, 0(r19)\nexit";
+    let config = LaunchConfig { shared_bytes: 128, ..ONE_WARP };
+    let memory = pseudo_random_bytes(6, 1024);
+    assert_matches_simulator(source, config, &[0, 256, 512], &memory).unwrap();
+}
+
+#[test]
 fn fixed_point_operations_match_simulator() {
     let source = "sreg r10, lane_index\nslli r11, r10, 3\nadd r11, r1, r11\nlw r12, 0(r11)\n\
                   lw r13, 4(r11)\nslli r20, r10, 4\nadd r20, r2, r20\nscale r14, r12, r13\n\
