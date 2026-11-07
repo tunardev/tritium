@@ -23,6 +23,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tritium-runtime"
+version = "0.1.0"
+dependencies = [
+ "tritium-assembler",
+ "tritium-isa",
+ "tritium-rtl",
+ "tritium-simulator",
+]
+
+[[package]]
 name = "tritium-simulator"
 version = "0.1.0"
 dependencies = [

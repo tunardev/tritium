@@ -1,0 +1,13 @@
+[package]
+name = "tritium-runtime"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tritium-isa = { path = "../isa" }
+tritium-rtl = { path = "../rtl" }
+tritium-simulator = { path = "../simulator" }
+
+[dev-dependencies]
+tritium-assembler = { path = "../assembler" }
