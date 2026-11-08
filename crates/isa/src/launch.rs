@@ -3,6 +3,7 @@ use std::fmt;
 use crate::{MAX_ARGUMENTS, SHARED_BYTES, WARP_LANES};
 
 pub const MAX_BLOCK_WARPS: u32 = 4;
+pub const DEFAULT_STEP_LIMIT: u64 = 100_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LaunchConfig {

@@ -1,9 +1,8 @@
 use std::ptr::NonNull;
 
-use tritium_isa::{Fault, LaunchConfig, LaunchReport, validate_launch};
+use tritium_isa::{DEFAULT_STEP_LIMIT, Fault, LaunchConfig, LaunchReport, validate_launch};
 
 const PROGRAM_WORDS: usize = 4096;
-const DEFAULT_STEP_LIMIT: u64 = 100_000_000;
 const CYCLES_PER_STEP_LIMIT: u64 = 4096;
 const MEMORY_LATENCY: u32 = 4;
 

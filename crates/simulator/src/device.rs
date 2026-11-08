@@ -1,8 +1,8 @@
-use tritium_isa::{Fault, LaunchConfig, LaunchReport, WARP_LANES, validate_launch};
+use tritium_isa::{
+    DEFAULT_STEP_LIMIT, Fault, LaunchConfig, LaunchReport, WARP_LANES, validate_launch,
+};
 
 use crate::warp::{Warp, WarpStatus};
-
-const DEFAULT_STEP_LIMIT: u64 = 100_000_000;
 
 pub struct Device {
     global: Vec<u8>,
