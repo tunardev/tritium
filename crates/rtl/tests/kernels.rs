@@ -1,6 +1,7 @@
 mod support;
 
 use support::{ONE_WARP, assert_matches_simulator};
+use tritium_assembler::assemble;
 use tritium_isa::{Fault, LaunchConfig};
 use tritium_rtl::RtlDevice;
 
@@ -199,6 +200,20 @@ fn fixed_point_operations_match_simulator() {
         memory[4 * index..][..4].copy_from_slice(&value.to_le_bytes());
     }
     assert_matches_simulator(source, ONE_WARP, &[0, 256], &memory).unwrap();
+}
+
+#[test]
+fn four_blocks_run_in_parallel() {
+    let program =
+        assemble("li r10, 200\nloop:\naddi r10, r10, -1\nbne r10, r0, loop\nexit").unwrap();
+    let cycles = |grid_blocks| {
+        let mut device = RtlDevice::new(64);
+        let config = LaunchConfig { grid_blocks, ..ONE_WARP };
+        device.launch(&program, config, &[]).unwrap();
+        device.cycles()
+    };
+    let (one, four) = (cycles(1), cycles(4));
+    assert!(four < one + one / 10, "one block {one} cycles, four blocks {four}");
 }
 
 #[test]

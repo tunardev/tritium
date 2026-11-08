@@ -1,6 +1,8 @@
 module tritium_gpu
   import tritium_package::*;
-(
+#(
+    parameter int COMPUTE_UNITS = 4
+) (
     input logic clock,
     input logic reset,
 
@@ -14,6 +16,7 @@ module tritium_gpu
     output logic [31:0] memory_address,
     output logic [ 3:0] memory_byte_enable,
     output logic [31:0] memory_write_data,
+    input  logic        memory_ready,
     input  logic        memory_response,
     input  logic [31:0] memory_read_data
 );
@@ -32,8 +35,6 @@ module tritium_gpu
   logic is_busy;
   logic is_done;
   logic [31:0] next_block;
-  logic [31:0] unit_block;
-  logic unit_start;
 
   fault_t fault_kind;
   logic [31:0] fault_block;
@@ -41,52 +42,108 @@ module tritium_gpu
   logic [31:0] fault_program_counter;
   logic [31:0] fault_value;
 
-  logic unit_busy;
-  logic unit_retire;
-  logic unit_fault;
-  fault_t unit_fault_kind;
-  logic [31:0] unit_fault_warp;
-  logic [31:0] unit_fault_program_counter;
-  logic [31:0] unit_fault_value;
+  logic [COMPUTE_UNITS-1:0] unit_start;
+  logic [COMPUTE_UNITS-1:0][31:0] unit_block;
+  logic [COMPUTE_UNITS-1:0] unit_busy;
+  logic [COMPUTE_UNITS-1:0] unit_retire;
+  logic [COMPUTE_UNITS-1:0] unit_fault;
+  fault_t [COMPUTE_UNITS-1:0] unit_fault_kind;
+  logic [COMPUTE_UNITS-1:0][31:0] unit_fault_warp;
+  logic [COMPUTE_UNITS-1:0][31:0] unit_fault_program_counter;
+  logic [COMPUTE_UNITS-1:0][31:0] unit_fault_value;
+  logic [COMPUTE_UNITS-1:0] unit_memory_request;
+  logic [COMPUTE_UNITS-1:0] unit_memory_write;
+  logic [COMPUTE_UNITS-1:0][31:0] unit_memory_address;
+  logic [COMPUTE_UNITS-1:0][3:0] unit_memory_byte_enable;
+  logic [COMPUTE_UNITS-1:0][31:0] unit_memory_write_data;
+  logic [COMPUTE_UNITS-1:0] unit_memory_response;
 
   logic program_write;
+  logic is_step_allowed;
+  logic [$clog2(COMPUTE_UNITS+1)-1:0] retired;
+  logic is_any_idle;
+  logic [$clog2(COMPUTE_UNITS)-1:0] idle_unit;
+  logic is_any_fault;
+  logic [$clog2(COMPUTE_UNITS)-1:0] fault_unit;
 
   assign program_write = host_write && host_address == HOST_PROGRAM_DATA;
+  assign is_step_allowed = steps < step_limit;
 
-  compute_unit compute_unit (
+  for (genvar unit = 0; unit < COMPUTE_UNITS; unit++) begin : gen_units
+    compute_unit compute_unit (
+        .clock(clock),
+        .reset(reset),
+        .program_write(program_write),
+        .program_address(program_address),
+        .program_data(host_write_data),
+        .start(unit_start[unit]),
+        .block_index(unit_block[unit]),
+        .grid_blocks(grid_blocks),
+        .block_threads(block_threads),
+        .global_bytes(global_bytes),
+        .shared_bytes(shared_bytes),
+        .program_length(program_length),
+        .argument_count(argument_count),
+        .arguments(arguments),
+        .is_step_allowed(is_step_allowed),
+        .busy(unit_busy[unit]),
+        .retire(unit_retire[unit]),
+        .fault(unit_fault[unit]),
+        .fault_kind(unit_fault_kind[unit]),
+        .fault_warp(unit_fault_warp[unit]),
+        .fault_program_counter(unit_fault_program_counter[unit]),
+        .fault_value(unit_fault_value[unit]),
+        .memory_request(unit_memory_request[unit]),
+        .memory_write(unit_memory_write[unit]),
+        .memory_address(unit_memory_address[unit]),
+        .memory_byte_enable(unit_memory_byte_enable[unit]),
+        .memory_write_data(unit_memory_write_data[unit]),
+        .memory_response(unit_memory_response[unit]),
+        .memory_read_data(memory_read_data)
+    );
+  end
+
+  memory_arbiter #(
+      .UNITS(COMPUTE_UNITS)
+  ) memory_arbiter (
       .clock(clock),
       .reset(reset),
-      .program_write(program_write),
-      .program_address(program_address),
-      .program_data(host_write_data),
-      .start(unit_start),
-      .block_index(unit_block),
-      .grid_blocks(grid_blocks),
-      .block_threads(block_threads),
-      .global_bytes(global_bytes),
-      .shared_bytes(shared_bytes),
-      .program_length(program_length),
-      .argument_count(argument_count),
-      .arguments(arguments),
-      .is_step_allowed(steps < step_limit),
-      .busy(unit_busy),
-      .retire(unit_retire),
-      .fault(unit_fault),
-      .fault_kind(unit_fault_kind),
-      .fault_warp(unit_fault_warp),
-      .fault_program_counter(unit_fault_program_counter),
-      .fault_value(unit_fault_value),
+      .unit_request(unit_memory_request),
+      .unit_write(unit_memory_write),
+      .unit_address(unit_memory_address),
+      .unit_byte_enable(unit_memory_byte_enable),
+      .unit_write_data(unit_memory_write_data),
+      .unit_response(unit_memory_response),
       .memory_request(memory_request),
       .memory_write(memory_write),
       .memory_address(memory_address),
       .memory_byte_enable(memory_byte_enable),
       .memory_write_data(memory_write_data),
-      .memory_response(memory_response),
-      .memory_read_data(memory_read_data)
+      .memory_ready(memory_ready),
+      .memory_response(memory_response)
   );
 
+  always_comb begin
+    retired = '0;
+    is_any_idle = 1'b0;
+    idle_unit = '0;
+    is_any_fault = 1'b0;
+    fault_unit = '0;
+    for (int unit = COMPUTE_UNITS - 1; unit >= 0; unit--) begin
+      retired = retired + unit_retire[unit];
+      if (!unit_busy[unit] && !unit_start[unit]) begin
+        is_any_idle = 1'b1;
+        idle_unit = unit[$clog2(COMPUTE_UNITS)-1:0];
+      end
+      if (unit_fault[unit]) begin
+        is_any_fault = 1'b1;
+        fault_unit = unit[$clog2(COMPUTE_UNITS)-1:0];
+      end
+    end
+  end
+
   always_ff @(posedge clock) begin
-    unit_start <= 1'b0;
+    unit_start <= '0;
     if (reset) begin
       is_busy <= 1'b0;
       is_done <= 1'b0;
@@ -121,22 +178,24 @@ module tritium_gpu
         endcase
       end
 
-      if (unit_retire) steps <= steps + 1;
+      steps <= steps + 64'(retired);
 
-      if (unit_fault) begin
-        fault_kind <= unit_fault_kind;
-        fault_block <= unit_block;
-        fault_warp <= unit_fault_warp;
-        fault_program_counter <= unit_fault_program_counter;
-        fault_value <= unit_fault_value;
+      if (is_any_fault && fault_kind == FAULT_NONE) begin
+        fault_kind <= unit_fault_kind[fault_unit];
+        fault_block <= unit_block[fault_unit];
+        fault_warp <= unit_fault_warp[fault_unit];
+        fault_program_counter <= unit_fault_program_counter[fault_unit];
+        fault_value <= unit_fault_value[fault_unit];
       end
 
-      if (is_busy && !unit_busy && !unit_start && !unit_fault) begin
-        if (next_block < grid_blocks && fault_kind == FAULT_NONE) begin
-          unit_block <= next_block;
-          unit_start <= 1'b1;
-          next_block <= next_block + 1;
-        end else begin
+      if (is_busy) begin
+        if (next_block < grid_blocks && fault_kind == FAULT_NONE && !is_any_fault) begin
+          if (is_any_idle) begin
+            unit_block[idle_unit] <= next_block;
+            unit_start[idle_unit] <= 1'b1;
+            next_block <= next_block + 1;
+          end
+        end else if (unit_busy == '0 && unit_start == '0 && unit_fault == '0) begin
           is_busy <= 1'b0;
           is_done <= 1'b1;
         end

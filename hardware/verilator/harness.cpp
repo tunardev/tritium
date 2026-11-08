@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <deque>
 #include <memory>
 #include <vector>
 
@@ -16,8 +17,7 @@ struct Harness {
   std::vector<uint8_t> global;
   uint32_t latency;
   uint64_t cycles = 0;
-  uint32_t countdown = 0;
-  uint32_t pending_data = 0;
+  std::deque<std::pair<uint64_t, uint32_t>> responses;
 
   Harness(size_t global_bytes, uint32_t latency)
       : context(std::make_unique<VerilatedContext>()),
@@ -25,32 +25,32 @@ struct Harness {
         global((global_bytes + 3) / 4 * 4, 0),
         latency(latency) {}
 
-  void access() {
+  uint32_t access() {
     uint32_t address = model->memory_address;
-    pending_data = 0;
-    if (address + 4 > global.size()) return;
+    uint32_t data = 0;
+    if (address + 4 > global.size()) return data;
     for (uint32_t byte = 0; byte < 4; byte++) {
       if (model->memory_write && (model->memory_byte_enable >> byte & 1))
         global[address + byte] = model->memory_write_data >> (8 * byte);
-      pending_data |= uint32_t(global[address + byte]) << (8 * byte);
+      data |= uint32_t(global[address + byte]) << (8 * byte);
     }
+    return data;
   }
 
   void tick() {
+    model->memory_ready = 1;
     model->memory_response = 0;
-    if (countdown > 0 && --countdown == 0) {
+    if (!responses.empty() && responses.front().first <= cycles) {
       model->memory_response = 1;
-      model->memory_read_data = pending_data;
+      model->memory_read_data = responses.front().second;
+      responses.pop_front();
     }
     model->clock = 0;
     model->eval();
     model->clock = 1;
     model->eval();
     cycles++;
-    if (model->memory_request) {
-      access();
-      countdown = latency;
-    }
+    if (model->memory_request) responses.emplace_back(cycles + latency - 1, access());
   }
 };
 
