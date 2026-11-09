@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -16,14 +17,17 @@ struct Harness {
   std::unique_ptr<Vtritium_gpu> model;
   std::vector<uint8_t> global;
   uint32_t latency;
+  uint32_t bytes_per_cycle;
+  int64_t tokens = 0;
   uint64_t cycles = 0;
   std::deque<std::pair<uint64_t, uint32_t>> responses;
 
-  Harness(size_t global_bytes, uint32_t latency)
+  Harness(size_t global_bytes, uint32_t latency, uint32_t bytes_per_cycle)
       : context(std::make_unique<VerilatedContext>()),
         model(std::make_unique<Vtritium_gpu>(context.get())),
         global((global_bytes + 3) / 4 * 4, 0),
-        latency(latency) {}
+        latency(latency),
+        bytes_per_cycle(bytes_per_cycle) {}
 
   uint32_t access() {
     uint32_t address = model->memory_address;
@@ -38,7 +42,8 @@ struct Harness {
   }
 
   void tick() {
-    model->memory_ready = 1;
+    tokens = std::min<int64_t>(tokens + bytes_per_cycle, 4 + int64_t(bytes_per_cycle));
+    model->memory_ready = tokens >= 4;
     model->memory_response = 0;
     if (!responses.empty() && responses.front().first <= cycles) {
       model->memory_response = 1;
@@ -50,7 +55,10 @@ struct Harness {
     model->clock = 1;
     model->eval();
     cycles++;
-    if (model->memory_request) responses.emplace_back(cycles + latency - 1, access());
+    if (model->memory_request) {
+      tokens -= 4;
+      responses.emplace_back(cycles + latency - 1, access());
+    }
   }
 };
 
@@ -60,8 +68,8 @@ double sc_time_stamp() { return 0; }
 
 extern "C" {
 
-Harness* tritium_harness_create(size_t global_bytes, uint32_t latency) {
-  auto* harness = new Harness(global_bytes, latency);
+Harness* tritium_harness_create(size_t global_bytes, uint32_t latency, uint32_t bytes_per_cycle) {
+  auto* harness = new Harness(global_bytes, latency, bytes_per_cycle);
   harness->model->reset = 1;
   for (int cycle = 0; cycle < 4; cycle++) harness->tick();
   harness->model->reset = 0;

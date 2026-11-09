@@ -3,7 +3,7 @@ mod support;
 use support::{ONE_WARP, assert_matches_simulator};
 use tritium_assembler::assemble;
 use tritium_isa::{Fault, LaunchConfig};
-use tritium_rtl::RtlDevice;
+use tritium_rtl::{MemoryTiming, RtlDevice};
 
 fn pseudo_random_bytes(seed: u32, count: usize) -> Vec<u8> {
     let mut state = seed;
@@ -228,4 +228,31 @@ fn store_past_memory_end_faults() {
     let source = "sreg r10, lane_index\nslli r10, r10, 4\nsw r10, 0(r10)\nexit";
     let fault = assert_matches_simulator(source, ONE_WARP, &[], &[0; 130]).unwrap_err();
     assert!(matches!(fault, Fault::AddressOutOfRange { address: 128, .. }));
+}
+
+#[test]
+fn memory_timing_changes_only_cycles() {
+    let program = assemble(
+        "sreg r10, thread_index\nslli r10, r10, 2\nlw r11, 0(r10)\naddi r11, r11, 1\n\
+         sw r11, 256(r10)\nexit",
+    )
+    .unwrap();
+    let config = LaunchConfig { grid_blocks: 1, block_threads: 64, shared_bytes: 0 };
+    let memory = pseudo_random_bytes(8, 512);
+    let mut cycles = Vec::new();
+    for (latency, bytes_per_cycle) in [(1, 4), (12, 2), (40, 1)] {
+        let mut device =
+            RtlDevice::with_memory_timing(512, MemoryTiming { latency, bytes_per_cycle });
+        device.global_mut().copy_from_slice(&memory);
+        device.launch(&program, config, &[]).unwrap();
+        let words: Vec<u32> = (0..64)
+            .map(|index| u32::from_le_bytes(memory[4 * index..][..4].try_into().unwrap()))
+            .collect();
+        for (index, word) in words.iter().enumerate() {
+            let stored = &device.global()[256 + 4 * index..][..4];
+            assert_eq!(u32::from_le_bytes(stored.try_into().unwrap()), word.wrapping_add(1));
+        }
+        cycles.push(device.cycles());
+    }
+    assert!(cycles[0] < cycles[1] && cycles[1] < cycles[2], "{cycles:?}");
 }

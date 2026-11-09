@@ -4,7 +4,6 @@ use tritium_isa::{DEFAULT_STEP_LIMIT, Fault, LaunchConfig, LaunchReport, validat
 
 const PROGRAM_WORDS: usize = 4096;
 const CYCLES_PER_STEP_LIMIT: u64 = 4096;
-const MEMORY_LATENCY: u32 = 4;
 
 const HOST_STATUS: u32 = 0;
 const HOST_GRID_BLOCKS: u32 = 1;
@@ -27,13 +26,29 @@ const HOST_STEPS_HIGH: u32 = 29;
 
 const STATUS_DONE: u32 = 2;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MemoryTiming {
+    pub latency: u32,
+    pub bytes_per_cycle: u32,
+}
+
+impl Default for MemoryTiming {
+    fn default() -> MemoryTiming {
+        MemoryTiming { latency: 12, bytes_per_cycle: 2 }
+    }
+}
+
 #[repr(C)]
 struct Harness {
     _private: [u8; 0],
 }
 
 unsafe extern "C" {
-    fn tritium_harness_create(global_bytes: usize, latency: u32) -> *mut Harness;
+    fn tritium_harness_create(
+        global_bytes: usize,
+        latency: u32,
+        bytes_per_cycle: u32,
+    ) -> *mut Harness;
     fn tritium_harness_destroy(harness: *mut Harness);
     fn tritium_harness_global(harness: *mut Harness) -> *mut u8;
     fn tritium_harness_write_register(harness: *mut Harness, address: u32, value: u32);
@@ -50,8 +65,14 @@ pub struct RtlDevice {
 
 impl RtlDevice {
     pub fn new(global_bytes: usize) -> RtlDevice {
-        let harness = NonNull::new(unsafe { tritium_harness_create(global_bytes, MEMORY_LATENCY) })
-            .expect("the Verilator harness could not be created");
+        RtlDevice::with_memory_timing(global_bytes, MemoryTiming::default())
+    }
+
+    pub fn with_memory_timing(global_bytes: usize, timing: MemoryTiming) -> RtlDevice {
+        assert!(timing.latency >= 1 && timing.bytes_per_cycle >= 1, "{timing:?}");
+        let harness =
+            unsafe { tritium_harness_create(global_bytes, timing.latency, timing.bytes_per_cycle) };
+        let harness = NonNull::new(harness).expect("the Verilator harness could not be created");
         RtlDevice { harness, global_bytes, step_limit: DEFAULT_STEP_LIMIT, cycles: 0 }
     }
 
