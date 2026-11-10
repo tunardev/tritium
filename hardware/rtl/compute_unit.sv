@@ -44,6 +44,7 @@ module compute_unit
     STATE_SELECT,
     STATE_FETCH,
     STATE_DECODE,
+    STATE_READ,
     STATE_EXECUTE,
     STATE_MEMORY_ADDRESS,
     STATE_MEMORY_WAIT,
@@ -141,7 +142,8 @@ module compute_unit
 
   register_file register_file (
       .clock(clock),
-      .read(state == STATE_DECODE),
+      .read_first(state == STATE_DECODE),
+      .read_second(state == STATE_READ),
       .read_address_a({warp, instruction[25:21]}),
       .read_address_b({warp, instruction[20:16]}),
       .read_address_c({warp, instruction[15:11]}),
@@ -396,7 +398,10 @@ module compute_unit
         STATE_DECODE: begin
           current <= decoded;
           if (!decoded.is_valid) raise(FAULT_INVALID_INSTRUCTION, instruction);
-          else state <= STATE_EXECUTE;
+          else state <= STATE_READ;
+        end
+        STATE_READ: begin
+          state <= STATE_EXECUTE;
         end
         STATE_EXECUTE: begin
           unique case (current.kind)
