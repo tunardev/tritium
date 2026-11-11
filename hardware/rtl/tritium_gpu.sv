@@ -1,7 +1,7 @@
 module tritium_gpu
   import tritium_package::*;
 #(
-    parameter int COMPUTE_UNITS = 4
+    parameter int COMPUTE_UNITS = 2
 ) (
     input logic clock,
     input logic reset,

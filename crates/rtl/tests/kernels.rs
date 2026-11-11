@@ -203,7 +203,7 @@ fn fixed_point_operations_match_simulator() {
 }
 
 #[test]
-fn four_blocks_run_in_parallel() {
+fn two_blocks_run_in_parallel() {
     let program =
         assemble("li r10, 200\nloop:\naddi r10, r10, -1\nbne r10, r0, loop\nexit").unwrap();
     let cycles = |grid_blocks| {
@@ -212,8 +212,8 @@ fn four_blocks_run_in_parallel() {
         device.launch(&program, config, &[]).unwrap();
         device.cycles()
     };
-    let (one, four) = (cycles(1), cycles(4));
-    assert!(four < one + one / 10, "one block {one} cycles, four blocks {four}");
+    let (one, two) = (cycles(1), cycles(2));
+    assert!(two < one + one / 10, "one block {one} cycles, two blocks {two}");
 }
 
 #[test]
