@@ -23,6 +23,8 @@ module fixed_point_unit
   logic [31:0] multiplier;
   logic [63:0] product;
   logic is_negative;
+  logic is_rounding;
+  logic [31:0] rounded_result;
 
   always_comb begin
     logic signed [31:0] shift;
@@ -57,17 +59,16 @@ module fixed_point_unit
     logic signed [63:0] rounded;
     signed_product = is_negative ? -$signed(product) : $signed(product);
     rounded = (signed_product + 64'sd32768) >>> 16;
-    if (rounded > 64'sd2147483647) result = 32'h7FFF_FFFF;
-    else if (rounded < -64'sd2147483648) result = 32'h8000_0000;
-    else result = rounded[31:0];
-    if (operation == FUNCTION_EXP2) result = exp2_result;
-    else if (operation == FUNCTION_RECIPROCAL_SQUARE_ROOT) result = rsqrt_result;
+    if (rounded > 64'sd2147483647) rounded_result = 32'h7FFF_FFFF;
+    else if (rounded < -64'sd2147483648) rounded_result = 32'h8000_0000;
+    else rounded_result = rounded[31:0];
   end
 
   always_ff @(posedge clock) begin
     done <= 1'b0;
     if (reset) begin
       is_multiplying <= 1'b0;
+      is_rounding <= 1'b0;
     end else if (start) begin
       if (operation == FUNCTION_SCALE) begin
         is_multiplying <= 1'b1;
@@ -77,8 +78,13 @@ module fixed_point_unit
         product <= '0;
         is_negative <= left[31] ^ right[31];
       end else begin
+        result <= operation == FUNCTION_EXP2 ? exp2_result : rsqrt_result;
         done <= 1'b1;
       end
+    end else if (is_rounding) begin
+      is_rounding <= 1'b0;
+      result <= rounded_result;
+      done <= 1'b1;
     end else if (is_multiplying) begin
       if (multiplier[0]) product <= product + multiplicand;
       multiplicand <= multiplicand << 1;
@@ -86,7 +92,7 @@ module fixed_point_unit
       step <= step + 1;
       if (step == 6'd31) begin
         is_multiplying <= 1'b0;
-        done <= 1'b1;
+        is_rounding <= 1'b1;
       end
     end
   end

@@ -38,20 +38,23 @@ module compute_unit
 
   localparam int REGISTER_ADDRESS_BITS = WARP_BITS + REGISTER_BITS;
 
-  typedef enum logic [3:0] {
+  typedef enum logic [4:0] {
     STATE_IDLE,
     STATE_INITIALIZE,
     STATE_SELECT,
     STATE_FETCH,
     STATE_DECODE,
     STATE_READ,
+    STATE_OPERANDS,
     STATE_EXECUTE,
+    STATE_WRITEBACK,
     STATE_MEMORY_ADDRESS,
     STATE_MEMORY_WAIT,
     STATE_DOT_ADDRESS,
     STATE_DOT_WEIGHTS,
     STATE_DOT_READ,
     STATE_DOT_CAPTURE,
+    STATE_DOT_SUM,
     STATE_DOT_WRITE,
     STATE_FIXED_START,
     STATE_FIXED_WAIT
@@ -93,6 +96,12 @@ module compute_unit
   logic [LANES-1:0][31:0] read_data_a;
   logic [LANES-1:0][31:0] read_data_b;
   logic [LANES-1:0][31:0] read_data_c;
+  logic [LANES-1:0][31:0] operand_a;
+  logic [LANES-1:0][31:0] operand_b;
+  logic [LANES-1:0][31:0] operand_c;
+  logic [LANES-1:0][31:0] results;
+  logic is_writing_results;
+  logic [31:0] next_program_counter;
   logic [LANES-1:0] write_enable;
   logic [REGISTER_ADDRESS_BITS-1:0] write_address;
   logic [LANES-1:0][31:0] write_data;
@@ -116,7 +125,7 @@ module compute_unit
   logic [191:0] dot_window;
   logic [19:0][7:0] dot_activations;
   logic [31:0] dot_sum;
-  logic [31:0] dot_result;
+  logic [31:0] dot_total;
   logic is_serial;
   logic fixed_done;
   logic [31:0] fixed_result;
@@ -133,6 +142,14 @@ module compute_unit
   always_ff @(posedge clock) begin
     if (program_write) program_memory[program_address] <= program_data;
     instruction <= program_memory[program_counter[PROGRAM_BITS-1:0]];
+  end
+
+  always_ff @(posedge clock) begin
+    if (state == STATE_OPERANDS) begin
+      operand_a <= read_data_a;
+      operand_b <= read_data_b;
+      operand_c <= read_data_c;
+    end
   end
 
   decoder decoder (
@@ -163,10 +180,9 @@ module compute_unit
       .read_data(shared_read_data)
   );
 
-  assign dot_word_address = read_data_c[lane][SHARED_BITS+1:2] + SHARED_BITS'(dot_word);
-  assign dot_window = dot_words >> {read_data_c[lane][1:0], 3'b0};
+  assign dot_word_address = operand_c[lane][SHARED_BITS+1:2] + SHARED_BITS'(dot_word);
+  assign dot_window = dot_words >> {operand_c[lane][1:0], 3'b0};
   assign dot_activations = dot_window[159:0];
-  assign dot_result = read_data_a[lane] + dot_sum;
   assign is_serial = current.kind == KIND_REGISTER && current.operation inside {
       FUNCTION_TERNARY_DOT, FUNCTION_SCALE, FUNCTION_EXP2, FUNCTION_RECIPROCAL_SQUARE_ROOT};
 
@@ -175,8 +191,8 @@ module compute_unit
       .reset(reset),
       .start(state == STATE_FIXED_START),
       .operation(current.operation),
-      .left(read_data_b[lane]),
-      .right(read_data_c[lane]),
+      .left(operand_b[lane]),
+      .right(operand_c[lane]),
       .done(fixed_done),
       .result(fixed_result)
   );
@@ -193,21 +209,21 @@ module compute_unit
 
     lane_alu lane_alu (
         .operation(current.operation),
-        .left(read_data_b[index]),
-        .right(current.kind == KIND_IMMEDIATE ? current.immediate : read_data_c[index]),
-        .destination(read_data_a[index]),
+        .left(operand_b[index]),
+        .right(current.kind == KIND_IMMEDIATE ? current.immediate : operand_c[index]),
+        .destination(operand_a[index]),
         .result(alu_result)
     );
 
     always_comb begin
       unique case (current.condition)
-        CONDITION_EQUAL: is_taken[index] = read_data_a[index] == read_data_b[index];
-        CONDITION_NOT_EQUAL: is_taken[index] = read_data_a[index] != read_data_b[index];
+        CONDITION_EQUAL: is_taken[index] = operand_a[index] == operand_b[index];
+        CONDITION_NOT_EQUAL: is_taken[index] = operand_a[index] != operand_b[index];
         CONDITION_LESS_THAN:
-        is_taken[index] = $signed(read_data_a[index]) < $signed(read_data_b[index]);
-        default: is_taken[index] = $signed(read_data_a[index]) >= $signed(read_data_b[index]);
+        is_taken[index] = $signed(operand_a[index]) < $signed(operand_b[index]);
+        default: is_taken[index] = $signed(operand_a[index]) >= $signed(operand_b[index]);
       endcase
-      jump_targets[index] = read_data_b[index] + current.immediate;
+      jump_targets[index] = operand_b[index] + current.immediate;
       unique case (current.special)
         SPECIAL_THREAD_INDEX: special = 32'(warp) * LANES + index;
         SPECIAL_BLOCK_INDEX: special = block_index;
@@ -251,7 +267,7 @@ module compute_unit
   end
 
   always_comb begin
-    lane_address = read_data_b[lane] + current.immediate;
+    lane_address = operand_b[lane] + current.immediate;
     if (current.kind == KIND_STORE) begin
       unique case (current.width)
         STORE_WIDTH_WORD: access_bytes = 3'd4;
@@ -286,7 +302,7 @@ module compute_unit
   always_comb begin
     shared_address = lane_address[SHARED_BITS+1:2];
     shared_write_enable = '0;
-    shared_write_data = read_data_a[lane] << {lane_address[1:0], 3'b0};
+    shared_write_data = operand_a[lane] << {lane_address[1:0], 3'b0};
     if (state == STATE_INITIALIZE) begin
       shared_address = initialize_index[SHARED_BITS-1:0];
       shared_write_enable = '1;
@@ -310,12 +326,9 @@ module compute_unit
             write_data[index] = arguments[initialize_register-1];
         end
       end
-      STATE_EXECUTE: begin
-        if (destination != 0 && !is_serial && current.kind inside {KIND_REGISTER, KIND_IMMEDIATE,
-            KIND_LOAD_UPPER, KIND_READ_SPECIAL, KIND_JUMP_AND_LINK})
-          write_enable = '1;
-        if (destination != 0 && current.kind == KIND_JUMP_AND_LINK_REGISTER && is_jump_uniform)
-          write_enable = '1;
+      STATE_WRITEBACK: begin
+        write_enable = {LANES{is_writing_results && destination != 0}};
+        write_data = results;
       end
       STATE_MEMORY_WAIT: begin
         if (is_access_complete && current.kind == KIND_LOAD && destination != 0)
@@ -324,7 +337,7 @@ module compute_unit
       end
       STATE_DOT_WRITE: begin
         write_enable[lane] = destination != 0;
-        write_data = {LANES{dot_result}};
+        write_data = {LANES{dot_total}};
       end
       STATE_FIXED_WAIT: begin
         write_enable[lane] = fixed_done && destination != 0;
@@ -343,8 +356,8 @@ module compute_unit
     state <= STATE_IDLE;
   endtask
 
-  task automatic finish_instruction(input logic [31:0] next_program_counter);
-    program_counters[warp] <= next_program_counter;
+  task automatic finish_instruction(input logic [31:0] target);
+    program_counters[warp] <= target;
     retire <= 1'b1;
     state <= STATE_SELECT;
   endtask
@@ -400,10 +413,15 @@ module compute_unit
           if (!decoded.is_valid) raise(FAULT_INVALID_INSTRUCTION, instruction);
           else state <= STATE_READ;
         end
-        STATE_READ: begin
-          state <= STATE_EXECUTE;
-        end
+        STATE_READ: state <= STATE_OPERANDS;
+        STATE_OPERANDS: state <= STATE_EXECUTE;
+        STATE_WRITEBACK: finish_instruction(next_program_counter);
         STATE_EXECUTE: begin
+          results <= lane_results;
+          is_writing_results <= !is_serial && current.kind inside {KIND_REGISTER, KIND_IMMEDIATE,
+              KIND_LOAD_UPPER, KIND_READ_SPECIAL, KIND_JUMP_AND_LINK, KIND_JUMP_AND_LINK_REGISTER};
+          next_program_counter <= link_address;
+          state <= STATE_WRITEBACK;
           unique case (current.kind)
             KIND_LOAD, KIND_STORE: begin
               lane <= '0;
@@ -411,29 +429,21 @@ module compute_unit
             end
             KIND_REGISTER: begin
               lane <= '0;
-              if (!is_serial) finish_instruction(link_address);
-              else if (current.operation == FUNCTION_TERNARY_DOT) state <= STATE_DOT_ADDRESS;
-              else state <= STATE_FIXED_START;
+              if (current.operation == FUNCTION_TERNARY_DOT) state <= STATE_DOT_ADDRESS;
+              else if (is_serial) state <= STATE_FIXED_START;
             end
             KIND_BRANCH: begin
               if (!is_branch_uniform) raise(FAULT_DIVERGENT_BRANCH, '0);
-              else if (is_taken[0]) finish_instruction(program_counter + current.immediate);
-              else finish_instruction(link_address);
+              else if (is_taken[0]) next_program_counter <= program_counter + current.immediate;
             end
-            KIND_JUMP_AND_LINK: finish_instruction(program_counter + current.immediate);
+            KIND_JUMP_AND_LINK: next_program_counter <= program_counter + current.immediate;
             KIND_JUMP_AND_LINK_REGISTER: begin
               if (!is_jump_uniform) raise(FAULT_DIVERGENT_BRANCH, '0);
-              else finish_instruction(jump_targets[0]);
+              else next_program_counter <= jump_targets[0];
             end
-            KIND_BARRIER: begin
-              warp_status[warp] <= WARP_AT_BARRIER;
-              finish_instruction(link_address);
-            end
-            KIND_EXIT: begin
-              warp_status[warp] <= WARP_EXITED;
-              finish_instruction(link_address);
-            end
-            default: finish_instruction(link_address);
+            KIND_BARRIER: warp_status[warp] <= WARP_AT_BARRIER;
+            KIND_EXIT: warp_status[warp] <= WARP_EXITED;
+            default: ;
           endcase
         end
         STATE_MEMORY_ADDRESS: begin
@@ -447,7 +457,7 @@ module compute_unit
             memory_request <= 1'b1;
             memory_write <= current.kind == KIND_STORE;
             memory_address <= {lane_address[31:2], 2'b0};
-            memory_write_data <= read_data_a[lane] << {lane_address[1:0], 3'b0};
+            memory_write_data <= operand_a[lane] << {lane_address[1:0], 3'b0};
             memory_byte_enable <= byte_enable;
             state <= STATE_MEMORY_WAIT;
           end
@@ -460,15 +470,15 @@ module compute_unit
           end
         end
         STATE_DOT_ADDRESS: begin
-          if (read_data_b[lane][1:0] != 0) raise(FAULT_MISALIGNED_ACCESS, read_data_b[lane]);
-          else if ({1'b0, read_data_b[lane]} + 33'd4 > {1'b0, global_bytes})
-            raise(FAULT_ADDRESS_OUT_OF_RANGE, read_data_b[lane]);
-          else if ({1'b0, read_data_c[lane]} + 33'd20 > {1'b0, shared_bytes})
-            raise(FAULT_ADDRESS_OUT_OF_RANGE, read_data_c[lane]);
+          if (operand_b[lane][1:0] != 0) raise(FAULT_MISALIGNED_ACCESS, operand_b[lane]);
+          else if ({1'b0, operand_b[lane]} + 33'd4 > {1'b0, global_bytes})
+            raise(FAULT_ADDRESS_OUT_OF_RANGE, operand_b[lane]);
+          else if ({1'b0, operand_c[lane]} + 33'd20 > {1'b0, shared_bytes})
+            raise(FAULT_ADDRESS_OUT_OF_RANGE, operand_c[lane]);
           else begin
             memory_request <= 1'b1;
             memory_write <= 1'b0;
-            memory_address <= read_data_b[lane];
+            memory_address <= operand_b[lane];
             memory_byte_enable <= 4'b0000;
             state <= STATE_DOT_WEIGHTS;
           end
@@ -484,7 +494,11 @@ module compute_unit
         STATE_DOT_CAPTURE: begin
           dot_words[dot_word] <= shared_read_data;
           dot_word <= dot_word + 1;
-          state <= dot_word == 3'd5 ? STATE_DOT_WRITE : STATE_DOT_READ;
+          state <= dot_word == 3'd5 ? STATE_DOT_SUM : STATE_DOT_READ;
+        end
+        STATE_DOT_SUM: begin
+          dot_total <= operand_a[lane] + dot_sum;
+          state <= STATE_DOT_WRITE;
         end
         STATE_DOT_WRITE: begin
           lane <= lane + 1;
