@@ -273,7 +273,7 @@ impl Parser {
         }
         let mut left = self.parse_binary(level + 1)?;
         loop {
-            let position = self.position();
+            let position = left.position;
             let Some(&(_, operator)) =
                 PRECEDENCE[level].iter().find(|(symbol, _)| self.is_symbol(symbol))
             else {
@@ -291,7 +291,7 @@ impl Parser {
     fn parse_product(&mut self) -> Result<Expression, CompileError> {
         let mut left = self.parse_unary()?;
         while self.is_symbol("*") {
-            let position = self.position();
+            let position = left.position;
             self.advance();
             let right = self.parse_unary()?;
             left = Expression {

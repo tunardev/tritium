@@ -223,6 +223,21 @@ fn fixed_point_builtins_match_isa() {
 }
 
 #[test]
+fn varying_branch_is_rejected() {
+    let error = compile(
+        "kernel divergent(output: *i32) {
+             let lane = lane_index();
+             if lane < 4 {
+                 output[lane] = 1;
+             }
+         }",
+    )
+    .unwrap_err();
+    assert_eq!((error.line, error.column), (3, 17));
+    assert!(error.message.contains("varies across lanes"), "{error}");
+}
+
+#[test]
 fn unknown_names_report_their_position() {
     let error = compile("kernel broken(output: *i32) {\n    output[0] = missing;\n}").unwrap_err();
     assert_eq!(error.to_string(), "2:17: unknown name missing");
