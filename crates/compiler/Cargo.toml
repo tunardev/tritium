@@ -1,0 +1,12 @@
+[package]
+name = "tritium-compiler"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tritium-assembler = { path = "../assembler" }
+tritium-isa = { path = "../isa" }
+
+[dev-dependencies]
+tritium-simulator = { path = "../simulator" }
