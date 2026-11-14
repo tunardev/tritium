@@ -9,6 +9,7 @@ pub trait Backend {
     fn global(&self) -> &[u8];
     fn global_mut(&mut self) -> &mut [u8];
     fn set_step_limit(&mut self, steps: u64);
+    fn cycles(&self) -> Option<u64>;
     fn launch(
         &mut self,
         program: &[u32],
@@ -28,6 +29,10 @@ impl Backend for Device {
 
     fn set_step_limit(&mut self, steps: u64) {
         Device::set_step_limit(self, steps);
+    }
+
+    fn cycles(&self) -> Option<u64> {
+        None
     }
 
     fn launch(
@@ -51,6 +56,10 @@ impl Backend for RtlDevice {
 
     fn set_step_limit(&mut self, steps: u64) {
         RtlDevice::set_step_limit(self, steps);
+    }
+
+    fn cycles(&self) -> Option<u64> {
+        Some(RtlDevice::cycles(self))
     }
 
     fn launch(

@@ -19,6 +19,7 @@ fn every_backend_runs_lane_stores() {
         let report = backend.launch(&program, ONE_WARP, &[]).unwrap();
         assert_eq!(report.warp_instructions, 4, "{kind}");
         assert_eq!(backend.global()[60..64], [15, 0, 0, 0], "{kind}");
+        assert_eq!(backend.cycles().is_some(), kind == BackendKind::Rtl, "{kind}");
     }
 }
 
