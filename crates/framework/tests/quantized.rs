@@ -1,6 +1,6 @@
-use tritium_framework::Tensor;
 use tritium_framework::operations::{bit_linear, embedding, int8_linear, relu_squared, sum};
 use tritium_framework::quantization::{quantize_activations, ternarize};
+use tritium_framework::{Tensor, Tokenizer};
 
 #[test]
 fn bit_linear_matches_integer_product() {
@@ -52,4 +52,16 @@ fn embedding_rows_are_int8_quantized() {
 fn relu_squared_clamps_its_input() {
     let output = relu_squared(&Tensor::new(vec![-3.0, 2.4, 40000.0], &[3]));
     assert_eq!(output.to_vec(), vec![0.0, 4.0, 32767.0 * 32767.0]);
+}
+
+#[test]
+fn tokenizer_round_trips_text() {
+    let text = "Once upon a time, a little cat sat.<|endoftext|>Once upon a time, a dog ran! 42";
+    let tokenizer = Tokenizer::train(&text.repeat(20), 300);
+    let tokens = tokenizer.encode(text);
+    assert_eq!(tokenizer.decode(&tokens), text);
+    assert!(tokens.len() < text.len() / 2, "{} tokens", tokens.len());
+    assert!(tokens.contains(&tokenizer.end_of_text()));
+    let restored = Tokenizer::from_text(&tokenizer.to_text()).unwrap();
+    assert_eq!(restored, tokenizer);
 }
