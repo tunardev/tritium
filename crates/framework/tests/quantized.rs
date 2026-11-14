@@ -65,3 +65,30 @@ fn tokenizer_round_trips_text() {
     let restored = Tokenizer::from_text(&tokenizer.to_text()).unwrap();
     assert_eq!(restored, tokenizer);
 }
+
+#[test]
+fn tensor_files_round_trip() {
+    let path = std::env::temp_dir().join(format!("tritium-tensors-{}.bin", std::process::id()));
+    let tensors = vec![
+        ("weight".to_string(), Tensor::new(vec![1.5, -2.0, 3.25, 0.0], &[2, 2])),
+        ("bias".to_string(), Tensor::new(vec![7.0], &[1])),
+    ];
+    tritium_framework::storage::save_tensors(&path, &tensors).unwrap();
+    let loaded = tritium_framework::storage::load_tensors(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(loaded.len(), 2);
+    assert_eq!((loaded[0].0.as_str(), loaded[0].1.shape()), ("weight", &[2, 2][..]));
+    assert_eq!(loaded[0].1.to_vec(), vec![1.5, -2.0, 3.25, 0.0]);
+}
+
+#[test]
+fn batches_pair_inputs_with_successors() {
+    let path = std::env::temp_dir().join(format!("tritium-tokens-{}.bin", std::process::id()));
+    let bytes: Vec<u8> = (0..100u16).flat_map(u16::to_le_bytes).collect();
+    std::fs::write(&path, bytes).unwrap();
+    let dataset = tritium_framework::TokenDataset::open(&path).unwrap();
+    std::fs::remove_file(&path).unwrap();
+    let (inputs, targets) = dataset.batch(3, 8, &mut tritium_framework::Random::new(1));
+    assert_eq!(inputs.len(), 24);
+    assert!(inputs.iter().zip(&targets).all(|(input, target)| target - input == 1));
+}
