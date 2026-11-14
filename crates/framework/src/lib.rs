@@ -1,5 +1,6 @@
 pub mod operations;
 pub mod optimizer;
+pub mod quantization;
 pub mod tensor;
 
 pub use optimizer::AdamW;

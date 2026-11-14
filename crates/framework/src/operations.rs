@@ -1,6 +1,9 @@
 use rayon::prelude::*;
 
+use crate::quantization::{ACTIVATION_LIMIT, activation_shift, quantize_rows, ternary_scale};
 use crate::tensor::Tensor;
+
+pub const RELU_SQUARED_LIMIT: f32 = 32767.0;
 
 #[allow(clippy::too_many_arguments)]
 fn multiply_into(
@@ -177,6 +180,133 @@ pub fn linear(input: &Tensor, weight: &Tensor) -> Tensor {
             let weight_gradient =
                 matrix_product(outputs, rows, inner, gradient, true, &input_data, false);
             vec![Some(input_gradient), Some(weight_gradient)]
+        }),
+    )
+}
+
+fn quantize_rows_of_activations(data: &[f32], columns: usize) -> (Vec<f32>, Vec<f32>) {
+    let mut quantized = Vec::with_capacity(data.len());
+    let mut steps = Vec::with_capacity(data.len() / columns);
+    for row in data.chunks_exact(columns) {
+        let rounded: Vec<i32> = row.iter().map(|value| value.round() as i32).collect();
+        let maximum = rounded.iter().map(|value| value.saturating_abs()).max().unwrap_or(0);
+        let step = 2f32.powi(activation_shift(maximum));
+        let limit = ACTIVATION_LIMIT as f32;
+        quantized.extend(row.iter().map(|value| (value / step).round().clamp(-limit, limit)));
+        steps.push(step);
+    }
+    (quantized, steps)
+}
+
+fn quantized_linear(
+    input: &Tensor,
+    weight: &Tensor,
+    effective_weight: Vec<f32>,
+    row_scales: Vec<f32>,
+) -> Tensor {
+    let (rows, inner) = matrix_shape(input, "the input");
+    let (outputs, weight_inner) = matrix_shape(weight, "the weight");
+    assert_eq!(inner, weight_inner, "input has {inner} features, weight expects {weight_inner}");
+    let (quantized, steps) = quantize_rows_of_activations(&input.data(), inner);
+    let mut data = matrix_product(rows, inner, outputs, &quantized, false, &effective_weight, true);
+    for row in data.chunks_exact_mut(outputs) {
+        for (value, scale) in row.iter_mut().zip(&row_scales) {
+            *value *= scale;
+        }
+    }
+    Tensor::from_operation(
+        data,
+        &[rows, outputs],
+        &[input, weight],
+        Box::new(move |gradient| {
+            let mut scaled = gradient.to_vec();
+            for row in scaled.chunks_exact_mut(outputs) {
+                for (value, scale) in row.iter_mut().zip(&row_scales) {
+                    *value *= scale;
+                }
+            }
+            let mut input_gradient =
+                matrix_product(rows, outputs, inner, &scaled, false, &effective_weight, false);
+            for (row, step) in input_gradient.chunks_exact_mut(inner).zip(&steps) {
+                row.iter_mut().for_each(|value| *value /= step);
+            }
+            let mut weight_gradient =
+                matrix_product(outputs, rows, inner, &scaled, true, &quantized, false);
+            for (row, scale) in weight_gradient.chunks_exact_mut(inner).zip(&row_scales) {
+                row.iter_mut().for_each(|value| *value /= scale);
+            }
+            vec![Some(input_gradient), Some(weight_gradient)]
+        }),
+    )
+}
+
+pub fn bit_linear(input: &Tensor, weight: &Tensor) -> Tensor {
+    let (outputs, _) = matrix_shape(weight, "the weight");
+    let weight_data = weight.to_vec();
+    let scale = ternary_scale(&weight_data);
+    let trits = weight_data.iter().map(|value| (value / scale).round().clamp(-1.0, 1.0)).collect();
+    quantized_linear(input, weight, trits, vec![scale; outputs])
+}
+
+pub fn int8_linear(input: &Tensor, weight: &Tensor) -> Tensor {
+    let (_, columns) = matrix_shape(weight, "the weight");
+    let (values, scales) = quantize_rows(&weight.data(), columns);
+    let values = values.into_iter().map(f32::from).collect();
+    quantized_linear(input, weight, values, scales)
+}
+
+pub fn embedding(table: &Tensor, indices: &[usize]) -> Tensor {
+    let (rows, columns) = matrix_shape(table, "the embedding table");
+    let (values, scales) = quantize_rows(&table.data(), columns);
+    let mut data = Vec::with_capacity(indices.len() * columns);
+    for &index in indices {
+        assert!(index < rows, "index {index} is outside an embedding of {rows} rows");
+        let row = &values[index * columns..][..columns];
+        data.extend(row.iter().map(|&value| f32::from(value) * scales[index]));
+    }
+    let indices = indices.to_vec();
+    Tensor::from_operation(
+        data,
+        &[indices.len(), columns],
+        &[table],
+        Box::new(move |gradient| {
+            let mut table_gradient = vec![0.0; rows * columns];
+            for (row, &index) in gradient.chunks_exact(columns).zip(&indices) {
+                let target = &mut table_gradient[index * columns..][..columns];
+                target.iter_mut().zip(row).for_each(|(total, value)| *total += value);
+            }
+            vec![Some(table_gradient)]
+        }),
+    )
+}
+
+pub fn relu_squared(input: &Tensor) -> Tensor {
+    let input_data = input.to_vec();
+    let data = input_data
+        .iter()
+        .map(|value| {
+            let clamped = value.round().clamp(0.0, RELU_SQUARED_LIMIT);
+            clamped * clamped
+        })
+        .collect();
+    Tensor::from_operation(
+        data,
+        input.shape(),
+        &[input],
+        Box::new(move |gradient| {
+            vec![Some(
+                gradient
+                    .iter()
+                    .zip(&input_data)
+                    .map(|(gradient, &value)| {
+                        if value > 0.0 && value < RELU_SQUARED_LIMIT {
+                            2.0 * value * gradient
+                        } else {
+                            0.0
+                        }
+                    })
+                    .collect(),
+            )]
         }),
     )
 }
