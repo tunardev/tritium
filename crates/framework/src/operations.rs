@@ -240,18 +240,23 @@ fn quantized_linear(
     )
 }
 
+pub fn fan_in_factor(inner: usize) -> f32 {
+    1.0 / (inner as f32).sqrt()
+}
+
 pub fn bit_linear(input: &Tensor, weight: &Tensor) -> Tensor {
-    let (outputs, _) = matrix_shape(weight, "the weight");
+    let (outputs, inner) = matrix_shape(weight, "the weight");
     let weight_data = weight.to_vec();
     let scale = ternary_scale(&weight_data);
     let trits = weight_data.iter().map(|value| (value / scale).round().clamp(-1.0, 1.0)).collect();
-    quantized_linear(input, weight, trits, vec![scale; outputs])
+    quantized_linear(input, weight, trits, vec![scale * fan_in_factor(inner); outputs])
 }
 
 pub fn int8_linear(input: &Tensor, weight: &Tensor) -> Tensor {
     let (_, columns) = matrix_shape(weight, "the weight");
     let (values, scales) = quantize_rows(&weight.data(), columns);
     let values = values.into_iter().map(f32::from).collect();
+    let scales = scales.into_iter().map(|scale| scale * fan_in_factor(columns)).collect();
     quantized_linear(input, weight, values, scales)
 }
 

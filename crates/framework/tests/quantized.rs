@@ -16,7 +16,7 @@ fn bit_linear_matches_integer_product() {
         for weight_row in trits.chunks(3) {
             let dot: i32 =
                 quantized.iter().zip(weight_row).map(|(&a, &w)| i32::from(a) * i32::from(w)).sum();
-            expected.push(dot as f32 * scale);
+            expected.push(dot as f32 * scale / 3f32.sqrt());
         }
     }
     let actual = output.to_vec();
