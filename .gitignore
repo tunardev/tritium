@@ -1,2 +1,4 @@
 /target
 /hardware/build
+__pycache__/
+/python/tritium/*.so

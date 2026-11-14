@@ -1,0 +1,23 @@
+[build-system]
+requires = ["maturin>=1.16,<2"]
+build-backend = "maturin"
+
+[project]
+name = "tritium"
+version = "0.1.0"
+description = "PyTorch-style framework for ternary language models on the tritium GPU"
+requires-python = ">=3.10"
+
+[dependency-groups]
+dev = ["pytest>=9.2", "ruff>=0.17"]
+
+[tool.maturin]
+manifest-path = "../crates/python/Cargo.toml"
+module-name = "tritium._core"
+python-source = "."
+
+[tool.ruff]
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP"]
