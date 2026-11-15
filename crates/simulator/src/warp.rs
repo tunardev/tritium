@@ -1,7 +1,7 @@
 use tritium_isa::{
-    BranchCondition, Fault, ImmediateOperation, Instruction, LaunchConfig, LoadWidth, MemorySpace,
-    REGISTER_COUNT, Register, RegisterOperation, Special, StoreWidth, TRITS_PER_WORD, WARP_LANES,
-    exp2, rsqrt, saturate_to_int8, scale, unpack_word,
+    BranchCondition, Fault, INT8_PER_WORD, ImmediateOperation, Instruction, LaunchConfig,
+    LoadWidth, MemorySpace, REGISTER_COUNT, Register, RegisterOperation, Special, StoreWidth,
+    TRITS_PER_WORD, WARP_LANES, exp2, rsqrt, saturate_to_int8, scale, unpack_word,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,6 +235,28 @@ impl Warp {
         Ok(())
     }
 
+    fn dot_operands<'a>(
+        &self,
+        global: &[u8],
+        shared: &'a [u8],
+        weight_address: u32,
+        activation_address: u32,
+        count: usize,
+    ) -> Result<(u32, &'a [u8]), Fault> {
+        let weight_start = self.checked_range(global.len(), weight_address, 4)?;
+        let word = u32::from_le_bytes(global[weight_start..weight_start + 4].try_into().unwrap());
+        let activation_start = self.checked_range(shared.len(), activation_address, 1)?;
+        if activation_start + count > shared.len() {
+            return Err(Fault::AddressOutOfRange {
+                block: self.block,
+                warp: self.index,
+                program_counter: self.program_counter,
+                address: activation_address,
+            });
+        }
+        Ok((word, &shared[activation_start..activation_start + count]))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn register_operation(
         &self,
@@ -272,22 +294,25 @@ impl Warp {
                 }
             }
             RegisterOperation::TernaryDot => {
-                let weight_start = self.checked_range(global.len(), left, 4)?;
-                let word =
-                    u32::from_le_bytes(global[weight_start..weight_start + 4].try_into().unwrap());
-                let activation_start = self.checked_range(shared.len(), right, 1)?;
-                if activation_start + TRITS_PER_WORD > shared.len() {
-                    return Err(Fault::AddressOutOfRange {
-                        block: self.block,
-                        warp: self.index,
-                        program_counter: self.program_counter,
-                        address: right,
-                    });
-                }
+                let (word, activations) =
+                    self.dot_operands(global, shared, left, right, TRITS_PER_WORD)?;
                 let sum: i32 = unpack_word(word)
                     .iter()
-                    .zip(&shared[activation_start..activation_start + TRITS_PER_WORD])
+                    .zip(activations)
                     .map(|(&trit, &activation)| i32::from(trit) * i32::from(activation as i8))
+                    .sum();
+                self.read(lane, destination).wrapping_add(sum as u32)
+            }
+            RegisterOperation::Int8Dot => {
+                let (word, activations) =
+                    self.dot_operands(global, shared, left, right, INT8_PER_WORD)?;
+                let sum: i32 = word
+                    .to_le_bytes()
+                    .iter()
+                    .zip(activations)
+                    .map(|(&weight, &activation)| {
+                        i32::from(weight as i8) * i32::from(activation as i8)
+                    })
                     .sum();
                 self.read(lane, destination).wrapping_add(sum as u32)
             }

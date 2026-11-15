@@ -1,5 +1,6 @@
 pub const TRITS_PER_BYTE: usize = 5;
 pub const TRITS_PER_WORD: usize = 4 * TRITS_PER_BYTE;
+pub const INT8_PER_WORD: usize = 4;
 
 const VALID_BYTES: u8 = 243;
 

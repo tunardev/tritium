@@ -199,3 +199,42 @@ fn halfword_loads_extend_by_signedness() {
 
     assert_eq!(read_words(&device, 256, 2), vec![(-2i32) as u32, 0xFFFE]);
 }
+
+#[test]
+fn int8_dot_matches_reference_sum() {
+    let program = assemble(
+        "sreg r10, lane_index\nslli r11, r10, 2\nlw r12, 0(r2)\nsws r12, 0(r11)\nlw r12, 4(r2)\n\
+         sws r12, 4(r0)\nbar\nadd r13, r1, r11\nli r14, 100\ndot8 r14, r13, r10\nadd r15, r3, r11\n\
+         sw r14, 0(r15)\nexit",
+    )
+    .unwrap();
+    let mut device = Device::new(1024);
+    let weights: Vec<i8> = (0..64).map(|index| (index * 37 % 255) as i8).collect();
+    let activations: Vec<i8> = vec![-128, 127, 5, -7, 64, -1, 0, 9];
+    for (index, &weight) in weights.iter().enumerate() {
+        device.global_mut()[index] = weight as u8;
+    }
+    for (index, &activation) in activations.iter().enumerate() {
+        device.global_mut()[256 + index] = activation as u8;
+    }
+    let config = LaunchConfig { grid_blocks: 1, block_threads: 16, shared_bytes: 64 };
+    device.launch(&program, config, &[0, 256, 512]).unwrap();
+
+    let shared: Vec<i8> = (0..16)
+        .flat_map(|lane| {
+            let word = if lane == 1 { &activations[4..8] } else { &activations[..4] };
+            word.to_vec()
+        })
+        .collect();
+    let expected: Vec<u32> = (0..16)
+        .map(|lane| {
+            let sum: i32 = (0..4)
+                .map(|offset| {
+                    i32::from(weights[4 * lane + offset]) * i32::from(shared[lane + offset])
+                })
+                .sum();
+            (100 + sum) as u32
+        })
+        .collect();
+    assert_eq!(read_words(&device, 512, 16), expected);
+}

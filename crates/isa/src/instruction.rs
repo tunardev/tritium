@@ -95,6 +95,7 @@ operation_enum!(RegisterOperation {
     Exp2 = 16, "exp2";
     ReciprocalSquareRoot = 17, "rsqrt";
     SaturateInt8 = 18, "sat8";
+    Int8Dot = 19, "dot8";
 });
 
 operation_enum!(ImmediateOperation {
