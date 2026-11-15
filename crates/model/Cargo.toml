@@ -5,5 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+tritium-compiler = { path = "../compiler" }
 tritium-framework = { path = "../framework" }
 tritium-isa = { path = "../isa" }
+tritium-runtime = { path = "../runtime" }

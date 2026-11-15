@@ -1,0 +1,155 @@
+kernel embed(tokens: *i8, token_factors: *i32, positions: *i8, position_factors: *i32,
+             residual: *i32, token: i32, position: i32, width: i32) {
+    let index = block_index() * block_threads() + thread_index();
+    let from_token = scale(tokens[token * width + index], token_factors[token]);
+    let from_position = scale(positions[position * width + index], position_factors[position]);
+    residual[index] = from_token + from_position;
+}
+
+kernel quantize(input: *i32, output: *i8, length: i32, squared: i32) {
+    shared maximum: [i32; 64];
+    let thread = thread_index();
+    let largest = 0;
+    for chunk in 0..(length >> 6) {
+        let value = input[chunk * 64 + thread];
+        let rectified = max(min(value, 32767), 0);
+        value = select(squared, rectified * rectified, value);
+        largest = max(largest, max(value, -value));
+    }
+    maximum[thread] = largest;
+    barrier();
+    let stride = 32;
+    while stride > 0 {
+        let other = maximum[(thread + stride) & 63];
+        barrier();
+        maximum[thread] = max(maximum[thread], other);
+        barrier();
+        stride = stride >> 1;
+    }
+    let absolute = maximum[0];
+    let bits = 0;
+    while (absolute >> bits) != 0 {
+        bits += 1;
+    }
+    let shift = bits - 7;
+    if absolute == 0 {
+        shift = 0;
+    }
+    for chunk in 0..(length >> 6) {
+        let index = chunk * 64 + thread;
+        let value = input[index];
+        let rectified = max(min(value, 32767), 0);
+        value = select(squared, rectified * rectified, value);
+        if shift <= 0 {
+            output[index] = value << (0 - shift);
+        } else {
+            output[index] = sat8((value + (1 << (shift - 1))) >> shift);
+        }
+    }
+}
+
+kernel project(input: *i8, weights: *i32, output: *i32, words: i32, factor: i32,
+               accumulate: i32) {
+    shared vector: [i8; 640];
+    let thread = thread_index();
+    for chunk in 0..((words * 20 + 63) >> 6) {
+        let index = chunk * 64 + thread;
+        vector[index] = input[index];
+    }
+    barrier();
+    let row = block_index() * block_threads() + thread;
+    let sum = 0;
+    for word in 0..words {
+        sum = tdot(sum, weights + row * words + word, vector, word * 20);
+    }
+    let value = scale(sum, factor);
+    if accumulate != 0 {
+        output[row] = output[row] + value;
+    } else {
+        output[row] = value;
+    }
+}
+
+kernel attention(query: *i32, keys: *i32, values: *i32, output: *i32, position: i32,
+                 width: i32, head_width: i32, factor: i32) {
+    shared scores: [i32; 128];
+    shared reduction: [i32; 64];
+    let head = block_index();
+    let thread = thread_index();
+    let base = head * head_width;
+    let chunks = (position + 64) >> 6;
+    for chunk in 0..chunks {
+        let source = chunk * 64 + thread;
+        let row = min(source, position);
+        let dot = 0;
+        for offset in 0..head_width {
+            let left = max(min(query[base + offset], 32767), -32767);
+            let right = max(min(keys[row * width + base + offset], 32767), -32767);
+            dot += left * right;
+        }
+        scores[source] = scale(dot, factor);
+    }
+    barrier();
+    let largest = -2147483648;
+    for chunk in 0..chunks {
+        let source = chunk * 64 + thread;
+        largest = select(source <= position, max(largest, scores[source]), largest);
+    }
+    reduction[thread] = largest;
+    barrier();
+    let stride = 32;
+    while stride > 0 {
+        let other = reduction[(thread + stride) & 63];
+        barrier();
+        reduction[thread] = max(reduction[thread], other);
+        barrier();
+        stride = stride >> 1;
+    }
+    let peak = reduction[0];
+    barrier();
+    let total = 0;
+    for chunk in 0..chunks {
+        let source = chunk * 64 + thread;
+        let weight = select(source <= position, exp2(scores[source] - peak), 0);
+        scores[source] = weight;
+        total += weight;
+    }
+    reduction[thread] = total;
+    barrier();
+    stride = 32;
+    while stride > 0 {
+        let other = reduction[(thread + stride) & 63];
+        barrier();
+        reduction[thread] = select(thread < stride, reduction[thread] + other, reduction[thread]);
+        barrier();
+        stride = stride >> 1;
+    }
+    let root = rsqrt(reduction[0]);
+    let inverse = scale(root, root);
+    let offset = thread & (head_width - 1);
+    let accumulated = 0;
+    for source in 0..(position + 1) {
+        let weight = scale(scores[source], inverse);
+        accumulated += scale(values[source * width + base + offset], weight);
+    }
+    output[base + offset] = accumulated;
+}
+
+kernel head(input: *i8, weights: *i32, factors: *i32, logits: *i32, width: i32) {
+    shared vector: [i32; 256];
+    let thread = thread_index();
+    for chunk in 0..(width >> 6) {
+        vector[chunk * 64 + thread] = input[chunk * 64 + thread];
+    }
+    barrier();
+    let row = block_index() * block_threads() + thread;
+    let words = width >> 2;
+    let sum = 0;
+    for word in 0..words {
+        let packed = weights[row * words + word];
+        let index = word * 4;
+        sum += ((packed << 24) >> 24) * vector[index] + ((packed << 16) >> 24) * vector[index + 1];
+        sum += ((packed << 8) >> 24) * vector[index + 2] + (packed >> 24) * vector[index + 3];
+    }
+    logits[row] = scale(sum, factors[row]);
+}

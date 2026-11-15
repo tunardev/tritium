@@ -261,8 +261,10 @@ version = "0.1.0"
 name = "tritium-model"
 version = "0.1.0"
 dependencies = [
+ "tritium-compiler",
  "tritium-framework",
  "tritium-isa",
+ "tritium-runtime",
 ]
 
 [[package]]
