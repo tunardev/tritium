@@ -1,0 +1,24 @@
+name: synthesis
+
+on:
+  workflow_dispatch:
+
+jobs:
+  ecp5:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 240
+    defaults:
+      run:
+        working-directory: hardware
+    steps:
+      - uses: actions/checkout@v7
+      - uses: YosysHQ/setup-oss-cad-suite@v4
+      - run: make synthesis
+      - run: make timing NEXTPNR="nextpnr-ecp5 --threads 4"
+      - run: grep -E "Max frequency|utilisation|TRELLIS_COMB:|DP16KD:|MULT18X18D:" build/nextpnr.log
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ecp5-reports
+          path: |
+            hardware/build/utilization.txt
+            hardware/build/nextpnr.log
