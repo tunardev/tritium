@@ -273,6 +273,8 @@ version = "0.1.0"
 dependencies = [
  "pyo3",
  "tritium-framework",
+ "tritium-model",
+ "tritium-runtime",
 ]
 
 [[package]]

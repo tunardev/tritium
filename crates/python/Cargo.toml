@@ -13,3 +13,5 @@ doctest = false
 [dependencies]
 pyo3 = { version = "0.30.1", features = ["abi3-py310"] }
 tritium-framework = { path = "../framework" }
+tritium-model = { path = "../model" }
+tritium-runtime = { path = "../runtime" }

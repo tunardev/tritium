@@ -1,10 +1,18 @@
 from tritium import functional, nn, optim
-from tritium._core import Tensor, TokenDataset, Tokenizer, is_grad_enabled, set_grad_enabled
+from tritium._core import (
+    DeviceModel,
+    Tensor,
+    TokenDataset,
+    Tokenizer,
+    is_grad_enabled,
+    set_grad_enabled,
+)
 from tritium._core import load_tensors as _load_tensors
 from tritium._core import normal as _normal
 from tritium._core import save_tensors as _save_tensors
 
 __all__ = [
+    "DeviceModel",
     "Tensor",
     "TokenDataset",
     "Tokenizer",

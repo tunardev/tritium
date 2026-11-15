@@ -1,9 +1,14 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 use pyo3::exceptions::{PyIOError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use tritium_framework::operations;
 use tritium_framework::{Random, TokenDataset, storage};
+use tritium_model::{
+    DeviceSession, IntegerModel, ModelConfig, ModelError, ReferenceSession, Statistics, sample,
+};
+use tritium_runtime::BackendKind;
 
 type CoreTensor = tritium_framework::Tensor;
 
@@ -424,12 +429,145 @@ impl Dataset {
     }
 }
 
+enum Session {
+    Reference(Box<ReferenceSession>),
+    Device(Box<DeviceSession>),
+}
+
+#[pyclass(name = "DeviceModel", unsendable)]
+pub struct DeviceModel {
+    model: IntegerModel,
+    backend: String,
+    session: Session,
+}
+
+fn start_session(model: &IntegerModel, backend: &str) -> PyResult<Session> {
+    if backend == "reference" {
+        return Ok(Session::Reference(Box::new(ReferenceSession::new(model.clone()))));
+    }
+    let kind = backend.parse::<BackendKind>().map_err(|_| {
+        PyValueError::new_err(format!(
+            "unknown backend {backend}; expected reference, simulator or rtl"
+        ))
+    })?;
+    Ok(Session::Device(Box::new(DeviceSession::new(model, kind))))
+}
+
+fn model_error(error: ModelError) -> PyErr {
+    PyValueError::new_err(error.0)
+}
+
+#[pymethods]
+impl DeviceModel {
+    #[new]
+    fn new(
+        config: HashMap<String, usize>,
+        state: Vec<(String, PyRef<'_, Tensor>)>,
+        backend: &str,
+    ) -> PyResult<DeviceModel> {
+        let field = |name: &str| {
+            config
+                .get(name)
+                .copied()
+                .ok_or_else(|| PyValueError::new_err(format!("config lacks {name}")))
+        };
+        let config = ModelConfig {
+            vocabulary_size: field("vocab_size")?,
+            width: field("width")?,
+            layers: field("layers")?,
+            heads: field("heads")?,
+            hidden: field("hidden")?,
+            context: field("context")?,
+        };
+        let tensors = state.into_iter().map(|(name, tensor)| (name, tensor.0.clone())).collect();
+        let model = IntegerModel::from_tensors(config, &tensors).map_err(model_error)?;
+        let session = start_session(&model, backend)?;
+        Ok(DeviceModel { model, backend: backend.to_string(), session })
+    }
+
+    #[getter]
+    fn backend(&self) -> &str {
+        &self.backend
+    }
+
+    #[getter]
+    fn context(&self) -> usize {
+        self.model.config.context
+    }
+
+    #[getter]
+    fn ternary_weight_bytes(&self) -> usize {
+        self.model.ternary_weight_bytes()
+    }
+
+    #[getter]
+    fn head_weight_bytes(&self) -> usize {
+        self.model.head.values.len()
+    }
+
+    fn reset(&mut self) -> PyResult<()> {
+        self.session = start_session(&self.model, &self.backend)?;
+        Ok(())
+    }
+
+    fn decode(&mut self, token: usize) -> PyResult<Vec<i32>> {
+        match &mut self.session {
+            Session::Reference(session) => session.decode(token),
+            Session::Device(session) => session.decode(token),
+        }
+        .map_err(model_error)
+    }
+
+    #[pyo3(signature = (prompt, max_new_tokens, temperature = 0.0, seed = 0))]
+    fn generate(
+        &mut self,
+        prompt: Vec<usize>,
+        max_new_tokens: usize,
+        temperature: f32,
+        seed: u64,
+    ) -> PyResult<Vec<usize>> {
+        if prompt.is_empty() {
+            return Err(PyValueError::new_err("the prompt needs at least one token"));
+        }
+        self.reset()?;
+        let mut random = Random::new(seed);
+        let mut logits = Vec::new();
+        for &token in &prompt {
+            logits = self.decode(token)?;
+        }
+        let mut generated = Vec::new();
+        let room = self.model.config.context - prompt.len().min(self.model.config.context);
+        for index in 0..max_new_tokens.min(room + 1) {
+            let token = sample(&logits, temperature, &mut random);
+            generated.push(token);
+            if index + 1 < max_new_tokens.min(room + 1) {
+                logits = self.decode(token)?;
+            }
+        }
+        Ok(generated)
+    }
+
+    fn statistics(&self) -> HashMap<&'static str, Option<u64>> {
+        let statistics = match &self.session {
+            Session::Reference(_) => Statistics::default(),
+            Session::Device(session) => session.statistics(),
+        };
+        HashMap::from([
+            ("tokens", Some(statistics.tokens)),
+            ("launches", Some(statistics.launches)),
+            ("warp_instructions", Some(statistics.warp_instructions)),
+            ("cycles", statistics.cycles),
+        ])
+    }
+}
+
 #[pymodule]
 fn _core(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<Tensor>()?;
     module.add_class::<AdamW>()?;
     module.add_class::<Tokenizer>()?;
     module.add_class::<Dataset>()?;
+    module.add_class::<DeviceModel>()?;
     for function in [
         wrap_pyfunction!(linear, module)?,
         wrap_pyfunction!(bit_linear, module)?,

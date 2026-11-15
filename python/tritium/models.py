@@ -2,6 +2,7 @@ from dataclasses import asdict, dataclass
 
 from tritium import functional as F
 from tritium import nn
+from tritium._core import DeviceModel
 from tritium.nn import _seed
 
 
@@ -58,3 +59,10 @@ class TernaryTransformer(nn.Module):
         for block in self.blocks:
             x = block(x, batch, self.config.heads)
         return self.head(x)
+
+    def to(self, device, backend="simulator"):
+        if device == "cpu":
+            return self
+        if device != "tritium":
+            raise ValueError(f"unknown device {device!r}; expected 'cpu' or 'tritium'")
+        return DeviceModel(self.config.to_dict(), list(self.state_dict().items()), backend)
