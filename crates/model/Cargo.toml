@@ -1,0 +1,9 @@
+[package]
+name = "tritium-model"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+tritium-framework = { path = "../framework" }
+tritium-isa = { path = "../isa" }
