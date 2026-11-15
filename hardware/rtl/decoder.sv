@@ -1,6 +1,8 @@
 module decoder
   import tritium_package::*;
-(
+#(
+    parameter logic [1:0] DOT_UNITS = DOT_TERNARY | DOT_INT8
+) (
     input  logic     [31:0] word,
     output decoded_t        decoded
 );
@@ -21,7 +23,11 @@ module decoder
       OPCODE_REGISTER: begin
         decoded.kind = KIND_REGISTER;
         decoded.operation = word[4:0];
-        decoded.is_valid = word[10:0] <= 11'(FUNCTION_SATURATE_INT8);
+        unique case (word[10:0])
+          11'(FUNCTION_TERNARY_DOT): decoded.is_valid = DOT_UNITS[0];
+          11'(FUNCTION_INT8_DOT): decoded.is_valid = DOT_UNITS[1];
+          default: decoded.is_valid = word[10:0] <= 11'(FUNCTION_SATURATE_INT8);
+        endcase
       end
       6'h01, 6'h08: begin
         decoded.kind = KIND_IMMEDIATE;

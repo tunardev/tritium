@@ -61,11 +61,14 @@ fn random_instruction(random: &mut Random) -> String {
             let operation = ["slli", "srli", "srai"][random.below(3) as usize];
             format!("{operation} {destination}, {left}, {}", random.below(32))
         }
-        6 => format!(
-            "andi r26, {left}, 252\nadd r26, r26, r1\nandi r27, {right}, {}\n\
-             tdot {destination}, r26, r27",
-            SHARED_BYTES - 20 - 1
-        ),
+        6 => {
+            let operation = ["tdot", "dot8"][random.below(2) as usize];
+            format!(
+                "andi r26, {left}, 252\nadd r26, r26, r1\nandi r27, {right}, {}\n\
+                 {operation} {destination}, r26, r27",
+                SHARED_BYTES - 20 - 1
+            )
+        }
         7 => {
             let (operation, mask) =
                 [("lw", 1020), ("lh", 1022), ("lhu", 1022), ("lb", 1023), ("lbu", 1023)]

@@ -1,6 +1,8 @@
 module compute_unit
   import tritium_package::*;
-(
+#(
+    parameter logic [1:0] DOT_UNITS = DOT_TERNARY | DOT_INT8
+) (
     input logic clock,
     input logic reset,
 
@@ -125,6 +127,10 @@ module compute_unit
   logic [191:0] dot_window;
   logic [19:0][7:0] dot_activations;
   logic [31:0] dot_sum;
+  logic [31:0] int8_sum;
+  logic is_int8_dot;
+  logic [2:0] dot_last_word;
+  logic [32:0] dot_activation_bytes;
   logic [31:0] dot_total;
   logic is_serial;
   logic fixed_done;
@@ -152,7 +158,9 @@ module compute_unit
     end
   end
 
-  decoder decoder (
+  decoder #(
+      .DOT_UNITS(DOT_UNITS)
+  ) decoder (
       .word(instruction),
       .decoded(decoded)
   );
@@ -184,7 +192,11 @@ module compute_unit
   assign dot_window = dot_words >> {operand_c[lane][1:0], 3'b0};
   assign dot_activations = dot_window[159:0];
   assign is_serial = current.kind == KIND_REGISTER && current.operation inside {
-      FUNCTION_TERNARY_DOT, FUNCTION_SCALE, FUNCTION_EXP2, FUNCTION_RECIPROCAL_SQUARE_ROOT};
+      FUNCTION_TERNARY_DOT, FUNCTION_INT8_DOT, FUNCTION_SCALE, FUNCTION_EXP2,
+      FUNCTION_RECIPROCAL_SQUARE_ROOT};
+  assign is_int8_dot = current.operation == FUNCTION_INT8_DOT;
+  assign dot_last_word = is_int8_dot ? 3'd1 : 3'd5;
+  assign dot_activation_bytes = is_int8_dot ? 33'd4 : 33'd20;
 
   fixed_point_unit fixed_point_unit (
       .clock(clock),
@@ -197,11 +209,25 @@ module compute_unit
       .result(fixed_result)
   );
 
-  ternary_dot ternary_dot (
-      .weights(dot_weights),
-      .activations(dot_activations),
-      .sum(dot_sum)
-  );
+  if (DOT_UNITS[0]) begin : gen_ternary_dot
+    ternary_dot ternary_dot (
+        .weights(dot_weights),
+        .activations(dot_activations),
+        .sum(dot_sum)
+    );
+  end else begin : gen_no_ternary_dot
+    assign dot_sum = '0;
+  end
+
+  if (DOT_UNITS[1]) begin : gen_int8_dot
+    int8_dot int8_dot (
+        .weights(dot_weights),
+        .activations(dot_activations[3:0]),
+        .sum(int8_sum)
+    );
+  end else begin : gen_no_int8_dot
+    assign int8_sum = '0;
+  end
 
   for (genvar index = 0; index < LANES; index++) begin : gen_lanes
     logic [31:0] alu_result;
@@ -429,7 +455,8 @@ module compute_unit
             end
             KIND_REGISTER: begin
               lane <= '0;
-              if (current.operation == FUNCTION_TERNARY_DOT) state <= STATE_DOT_ADDRESS;
+              if (current.operation inside {FUNCTION_TERNARY_DOT, FUNCTION_INT8_DOT})
+                state <= STATE_DOT_ADDRESS;
               else if (is_serial) state <= STATE_FIXED_START;
             end
             KIND_BRANCH: begin
@@ -473,7 +500,7 @@ module compute_unit
           if (operand_b[lane][1:0] != 0) raise(FAULT_MISALIGNED_ACCESS, operand_b[lane]);
           else if ({1'b0, operand_b[lane]} + 33'd4 > {1'b0, global_bytes})
             raise(FAULT_ADDRESS_OUT_OF_RANGE, operand_b[lane]);
-          else if ({1'b0, operand_c[lane]} + 33'd20 > {1'b0, shared_bytes})
+          else if ({1'b0, operand_c[lane]} + dot_activation_bytes > {1'b0, shared_bytes})
             raise(FAULT_ADDRESS_OUT_OF_RANGE, operand_c[lane]);
           else begin
             memory_request <= 1'b1;
@@ -494,10 +521,10 @@ module compute_unit
         STATE_DOT_CAPTURE: begin
           dot_words[dot_word] <= shared_read_data;
           dot_word <= dot_word + 1;
-          state <= dot_word == 3'd5 ? STATE_DOT_SUM : STATE_DOT_READ;
+          state <= dot_word == dot_last_word ? STATE_DOT_SUM : STATE_DOT_READ;
         end
         STATE_DOT_SUM: begin
-          dot_total <= operand_a[lane] + dot_sum;
+          dot_total <= operand_a[lane] + (is_int8_dot ? int8_sum : dot_sum);
           state <= STATE_DOT_WRITE;
         end
         STATE_DOT_WRITE: begin

@@ -1,7 +1,8 @@
 module tritium_gpu
   import tritium_package::*;
 #(
-    parameter int COMPUTE_UNITS = 2
+    parameter int COMPUTE_UNITS = 2,
+    parameter logic [1:0] DOT_UNITS = DOT_TERNARY | DOT_INT8
 ) (
     input logic clock,
     input logic reset,
@@ -70,7 +71,9 @@ module tritium_gpu
   assign is_step_allowed = steps < step_limit;
 
   for (genvar unit = 0; unit < COMPUTE_UNITS; unit++) begin : gen_units
-    compute_unit compute_unit (
+    compute_unit #(
+        .DOT_UNITS(DOT_UNITS)
+    ) compute_unit (
         .clock(clock),
         .reset(reset),
         .program_write(program_write),

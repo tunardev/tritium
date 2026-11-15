@@ -83,6 +83,10 @@ package tritium_package;
   localparam logic [4:0] FUNCTION_EXP2 = 5'd16;
   localparam logic [4:0] FUNCTION_RECIPROCAL_SQUARE_ROOT = 5'd17;
   localparam logic [4:0] FUNCTION_SATURATE_INT8 = 5'd18;
+  localparam logic [4:0] FUNCTION_INT8_DOT = 5'd19;
+
+  localparam logic [1:0] DOT_TERNARY = 2'b01;
+  localparam logic [1:0] DOT_INT8 = 2'b10;
 
   localparam logic [2:0] WIDTH_WORD = 3'd0;
   localparam logic [2:0] WIDTH_HALF = 3'd1;
