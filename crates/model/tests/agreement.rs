@@ -6,7 +6,7 @@ use tritium_runtime::BackendKind;
 
 fn assert_backend_matches_reference(config: ModelConfig, kind: BackendKind, tokens: &[usize]) {
     let model = random_model(config, 7);
-    let mut reference = ReferenceSession::new(&model);
+    let mut reference = ReferenceSession::new(model.clone());
     let mut device = DeviceSession::new(&model, kind);
     for (position, &token) in tokens.iter().enumerate() {
         let expected = reference.decode(token).unwrap();
@@ -28,8 +28,8 @@ fn rtl_logits_match_reference() {
 #[test]
 fn reference_logits_vary_with_context() {
     let model = random_model(SMALL, 7);
-    let mut first = ReferenceSession::new(&model);
-    let mut second = ReferenceSession::new(&model);
+    let mut first = ReferenceSession::new(model.clone());
+    let mut second = ReferenceSession::new(model.clone());
     first.decode(1).unwrap();
     second.decode(2).unwrap();
     assert_ne!(first.decode(5).unwrap(), second.decode(5).unwrap());
@@ -38,7 +38,7 @@ fn reference_logits_vary_with_context() {
 #[test]
 fn full_context_is_an_error() {
     let model = random_model(SMALL, 7);
-    let mut session = ReferenceSession::new(&model);
+    let mut session = ReferenceSession::new(model.clone());
     for _ in 0..SMALL.context {
         session.decode(0).unwrap();
     }

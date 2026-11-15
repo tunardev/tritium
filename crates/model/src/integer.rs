@@ -240,15 +240,15 @@ fn multiply_halfwords(left: i32, right: i32) -> i32 {
     i32::from(left as i16) * i32::from(right as i16)
 }
 
-pub struct ReferenceSession<'a> {
-    model: &'a IntegerModel,
+pub struct ReferenceSession {
+    model: IntegerModel,
     keys: Vec<Vec<i32>>,
     values: Vec<Vec<i32>>,
     position: usize,
 }
 
-impl<'a> ReferenceSession<'a> {
-    pub fn new(model: &'a IntegerModel) -> ReferenceSession<'a> {
+impl ReferenceSession {
+    pub fn new(model: IntegerModel) -> ReferenceSession {
         let cache = vec![vec![0; model.config.context * model.config.width]; model.config.layers];
         ReferenceSession { model, keys: cache.clone(), values: cache, position: 0 }
     }
@@ -258,7 +258,7 @@ impl<'a> ReferenceSession<'a> {
     }
 
     pub fn decode(&mut self, token: usize) -> Result<Vec<i32>, ModelError> {
-        let model = self.model;
+        let model = &self.model;
         let config = model.config;
         if token >= config.vocabulary_size {
             return Err(ModelError(format!("token {token} is outside the vocabulary")));
