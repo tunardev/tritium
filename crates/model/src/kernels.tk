@@ -48,8 +48,8 @@ kernel quantize(input: *i32, output: *i8, length: i32, squared: i32) {
     }
 }
 
-kernel project(input: *i8, weights: *i32, output: *i32, words: i32, factor: i32,
-               accumulate: i32) {
+kernel ternary_project(input: *i8, weights: *i32, output: *i32, words: i32, factor: i32,
+                       accumulate: i32) {
     shared vector: [i8; 640];
     let thread = thread_index();
     for chunk in 0..((words * 20 + 63) >> 6) {
@@ -61,6 +61,28 @@ kernel project(input: *i8, weights: *i32, output: *i32, words: i32, factor: i32,
     let sum = 0;
     for word in 0..words {
         sum = tdot(sum, weights + row * words + word, vector, word * 20);
+    }
+    let value = scale(sum, factor);
+    if accumulate != 0 {
+        output[row] = output[row] + value;
+    } else {
+        output[row] = value;
+    }
+}
+
+kernel int8_project(input: *i8, weights: *i32, output: *i32, words: i32, factor: i32,
+                    accumulate: i32) {
+    shared vector: [i8; 640];
+    let thread = thread_index();
+    for chunk in 0..((words * 4 + 63) >> 6) {
+        let index = chunk * 64 + thread;
+        vector[index] = input[index];
+    }
+    barrier();
+    let row = block_index() * block_threads() + thread;
+    let sum = 0;
+    for word in 0..words {
+        sum = dot8(sum, weights + row * words + word, vector, word * 4);
     }
     let value = scale(sum, factor);
     if accumulate != 0 {

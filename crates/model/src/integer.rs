@@ -66,10 +66,42 @@ impl ModelConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Projection {
     pub rows: usize,
+    pub inner: usize,
     pub words_per_row: usize,
     pub packed: Vec<u8>,
     pub trits: Vec<i8>,
     pub factor: i32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WeightFormat {
+    Ternary,
+    Int8,
+}
+
+impl std::str::FromStr for WeightFormat {
+    type Err = ModelError;
+
+    fn from_str(text: &str) -> Result<WeightFormat, ModelError> {
+        match text {
+            "ternary" => Ok(WeightFormat::Ternary),
+            "int8" => Ok(WeightFormat::Int8),
+            _ => Err(ModelError(format!("unknown weight format {text}; expected ternary or int8"))),
+        }
+    }
+}
+
+impl Projection {
+    pub fn weight_bytes(&self, format: WeightFormat) -> Vec<u8> {
+        match format {
+            WeightFormat::Ternary => self.packed.clone(),
+            WeightFormat::Int8 => self
+                .trits
+                .chunks_exact(self.words_per_row * TRITS_PER_WORD)
+                .flat_map(|row| row[..self.inner].iter().map(|&trit| trit as u8))
+                .collect(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,7 +143,7 @@ fn projection(weight: &Tensor, rows: usize, inner: usize) -> Projection {
         padded.resize(padded.len() + words_per_row * TRITS_PER_WORD - inner, 0);
     }
     let factor = to_fixed(weight_scale / (inner as f32).sqrt() * RESIDUAL_ONE);
-    Projection { rows, words_per_row, packed, trits: padded, factor }
+    Projection { rows, inner, words_per_row, packed, trits: padded, factor }
 }
 
 fn int8_rows(weight: &Tensor, columns: usize, factor_of: impl Fn(f32) -> f32) -> Int8Rows {
@@ -178,13 +210,13 @@ impl IntegerModel {
         })
     }
 
-    pub fn ternary_weight_bytes(&self) -> usize {
+    pub fn projection_weight_bytes(&self, format: WeightFormat) -> usize {
         self.layers
             .iter()
             .flat_map(|layer| {
                 [&layer.query, &layer.key, &layer.value, &layer.output, &layer.up, &layer.down]
             })
-            .map(|projection| projection.packed.len())
+            .map(|projection| projection.weight_bytes(format).len())
             .sum()
     }
 }

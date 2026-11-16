@@ -1,14 +1,17 @@
 use tritium_compiler::{Kernel, compile};
 use tritium_runtime::{Backend, BackendKind, LaunchConfig};
 
-use crate::integer::{IntegerModel, ModelError, Projection, SHARED_VECTOR_BYTES};
+use tritium_isa::INT8_PER_WORD;
+
+use crate::integer::{IntegerModel, ModelError, Projection, SHARED_VECTOR_BYTES, WeightFormat};
 
 const BLOCK_THREADS: u32 = 64;
 
 struct Kernels {
     embed: Kernel,
     quantize: Kernel,
-    project: Kernel,
+    ternary_project: Kernel,
+    int8_project: Kernel,
     attention: Kernel,
     head: Kernel,
 }
@@ -16,11 +19,12 @@ struct Kernels {
 impl Kernels {
     fn compile() -> Kernels {
         let mut kernels = compile(crate::KERNELS).expect("the model kernels compile").into_iter();
-        let mut next = || kernels.next().expect("five model kernels");
+        let mut next = || kernels.next().expect("six model kernels");
         Kernels {
             embed: next(),
             quantize: next(),
-            project: next(),
+            ternary_project: next(),
+            int8_project: next(),
             attention: next(),
             head: next(),
         }
@@ -84,11 +88,19 @@ impl Memory {
         self.place(&bytes)
     }
 
-    fn place_projection(&mut self, projection: &Projection) -> PlacedProjection {
+    fn place_projection(
+        &mut self,
+        projection: &Projection,
+        format: WeightFormat,
+    ) -> PlacedProjection {
+        let words_per_row = match format {
+            WeightFormat::Ternary => projection.words_per_row,
+            WeightFormat::Int8 => projection.inner / INT8_PER_WORD,
+        };
         PlacedProjection {
-            address: self.place(&projection.packed),
+            address: self.place(&projection.weight_bytes(format)),
             rows: projection.rows as u32,
-            words_per_row: projection.words_per_row as u32,
+            words_per_row: words_per_row as u32,
             factor: projection.factor,
         }
     }
@@ -108,6 +120,7 @@ pub struct Statistics {
 
 pub struct DeviceSession {
     backend: Box<dyn Backend>,
+    format: WeightFormat,
     kernels: Kernels,
     layout: Layout,
     width: u32,
@@ -122,7 +135,7 @@ pub struct DeviceSession {
 }
 
 impl DeviceSession {
-    pub fn new(model: &IntegerModel, kind: BackendKind) -> DeviceSession {
+    pub fn new(model: &IntegerModel, kind: BackendKind, format: WeightFormat) -> DeviceSession {
         let config = model.config;
         let mut memory = Memory { bytes: Vec::new() };
         let token_values = memory.place(&bytes_of(&model.token_embedding.values));
@@ -134,12 +147,12 @@ impl DeviceSession {
             .layers
             .iter()
             .map(|layer| PlacedLayer {
-                query: memory.place_projection(&layer.query),
-                key: memory.place_projection(&layer.key),
-                value: memory.place_projection(&layer.value),
-                output: memory.place_projection(&layer.output),
-                up: memory.place_projection(&layer.up),
-                down: memory.place_projection(&layer.down),
+                query: memory.place_projection(&layer.query, format),
+                key: memory.place_projection(&layer.key, format),
+                value: memory.place_projection(&layer.value, format),
+                output: memory.place_projection(&layer.output, format),
+                up: memory.place_projection(&layer.up, format),
+                down: memory.place_projection(&layer.down, format),
                 keys: memory.reserve(cache_bytes),
                 values: memory.reserve(cache_bytes),
             })
@@ -165,6 +178,7 @@ impl DeviceSession {
         backend.global_mut().copy_from_slice(&memory.bytes);
         DeviceSession {
             backend,
+            format,
             kernels: Kernels::compile(),
             layout,
             width: config.width as u32,
@@ -230,7 +244,13 @@ impl DeviceSession {
             projection.factor as u32,
             u32::from(is_accumulating),
         ];
-        self.launch(|kernels| &kernels.project, projection.rows / BLOCK_THREADS, &arguments)
+        let blocks = projection.rows / BLOCK_THREADS;
+        match self.format {
+            WeightFormat::Ternary => {
+                self.launch(|kernels| &kernels.ternary_project, blocks, &arguments)
+            }
+            WeightFormat::Int8 => self.launch(|kernels| &kernels.int8_project, blocks, &arguments),
+        }
     }
 
     pub fn decode(&mut self, token: usize) -> Result<Vec<i32>, ModelError> {
