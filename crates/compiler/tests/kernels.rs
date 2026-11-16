@@ -274,3 +274,39 @@ fn pointer_arithmetic_scales_by_element() {
     let expected: Vec<i32> = (0..16).map(|lane| (lane + 2) + (lane + 3) * 10).collect();
     assert_eq!(read_words(&device, 256, 16), expected);
 }
+
+#[test]
+fn int8_dot_builtin_accumulates_bytes() {
+    let kernel = compile_kernel(
+        "kernel int8_rows(weights: *i32, activations: *i8, output: *i32) {
+             shared vector: [i8; 16];
+             vector[lane_index()] = activations[lane_index()];
+             barrier();
+             let row = thread_index();
+             let sum = 0;
+             for word in 0..4 {
+                 sum = dot8(sum, weights + row * 4 + word, vector, word * 4);
+             }
+             output[row] = sum;
+         }",
+        "int8_rows",
+    )
+    .unwrap();
+    let weights: Vec<i8> = (0..256).map(|index| (index * 29 % 255) as i8).collect();
+    let activations: Vec<i8> = (0..16).map(|index| (index * 53 % 255) as i8).collect();
+    let mut device = Device::new(1024);
+    for (index, &weight) in weights.iter().enumerate() {
+        device.global_mut()[index] = weight as u8;
+    }
+    for (index, &activation) in activations.iter().enumerate() {
+        device.global_mut()[512 + index] = activation as u8;
+    }
+
+    device.launch(&kernel.program, kernel.launch_config(1, 16), &[0, 512, 768]).unwrap();
+
+    let expected: Vec<i32> = weights
+        .chunks(16)
+        .map(|row| row.iter().zip(&activations).map(|(&w, &a)| i32::from(w) * i32::from(a)).sum())
+        .collect();
+    assert_eq!(read_words(&device, 768, 16), expected);
+}

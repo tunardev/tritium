@@ -527,7 +527,7 @@ impl Generator {
                 self.release(other);
                 Ok(result)
             }
-            "tdot" => {
+            "tdot" | "dot8" => {
                 expect(4)?;
                 let accumulator = self.integer_operand(&arguments[0])?;
                 let result = self.temporary(position, Type::Integer)?;
@@ -535,12 +535,15 @@ impl Generator {
                 self.release(accumulator);
                 let weights = self.expression(&arguments[1])?;
                 if !matches!(weights.value_type, Type::Pointer(_)) {
-                    return error(arguments[1].position, "tdot weights must be a pointer");
+                    return error(
+                        arguments[1].position,
+                        format!("{name} weights must be a pointer"),
+                    );
                 }
                 let ExpressionKind::Variable(array) = &arguments[2].kind else {
                     return error(
                         arguments[2].position,
-                        "tdot activations must be a shared i8 array",
+                        format!("{name} activations must be a shared i8 array"),
                     );
                 };
                 let (address, element, is_shared) =
@@ -548,11 +551,11 @@ impl Generator {
                 if !is_shared || element != Element::I8 {
                     return error(
                         arguments[2].position,
-                        "tdot activations must be a shared i8 array",
+                        format!("{name} activations must be a shared i8 array"),
                     );
                 }
                 self.emit(format!(
-                    "tdot r{}, r{}, r{}",
+                    "{name} r{}, r{}, r{}",
                     result.register, weights.register, address.register
                 ));
                 self.release(weights);
