@@ -11,11 +11,12 @@ def main(arguments=None):
     parser.add_argument("--prompt", default="Once upon a time")
     parser.add_argument("--tokens", type=int, default=80)
     parser.add_argument("--backend", default="reference", choices=["reference", "simulator", "rtl"])
+    parser.add_argument("--weights", default="ternary", choices=["ternary", "int8"])
     parser.add_argument("--temperature", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=0)
     arguments = parser.parse_args(arguments)
     model, tokenizer, _ = load_run(arguments.run)
-    device_model = model.to("tritium", backend=arguments.backend)
+    device_model = model.to("tritium", backend=arguments.backend, weights=arguments.weights)
     prompt = tokenizer.encode(arguments.prompt)
     began = time.perf_counter()
     generated = device_model.generate(

@@ -6,7 +6,8 @@ use pyo3::prelude::*;
 use tritium_framework::operations;
 use tritium_framework::{Random, TokenDataset, storage};
 use tritium_model::{
-    DeviceSession, IntegerModel, ModelConfig, ModelError, ReferenceSession, Statistics, sample,
+    DeviceSession, IntegerModel, ModelConfig, ModelError, ReferenceSession, Statistics,
+    WeightFormat, sample,
 };
 use tritium_runtime::BackendKind;
 
@@ -438,10 +439,11 @@ enum Session {
 pub struct DeviceModel {
     model: IntegerModel,
     backend: String,
+    format: WeightFormat,
     session: Session,
 }
 
-fn start_session(model: &IntegerModel, backend: &str) -> PyResult<Session> {
+fn start_session(model: &IntegerModel, backend: &str, format: WeightFormat) -> PyResult<Session> {
     if backend == "reference" {
         return Ok(Session::Reference(Box::new(ReferenceSession::new(model.clone()))));
     }
@@ -450,7 +452,7 @@ fn start_session(model: &IntegerModel, backend: &str) -> PyResult<Session> {
             "unknown backend {backend}; expected reference, simulator or rtl"
         ))
     })?;
-    Ok(Session::Device(Box::new(DeviceSession::new(model, kind))))
+    Ok(Session::Device(Box::new(DeviceSession::new(model, kind, format))))
 }
 
 fn model_error(error: ModelError) -> PyErr {
@@ -460,11 +462,14 @@ fn model_error(error: ModelError) -> PyErr {
 #[pymethods]
 impl DeviceModel {
     #[new]
+    #[pyo3(signature = (config, state, backend, weights = "ternary"))]
     fn new(
         config: HashMap<String, usize>,
         state: Vec<(String, PyRef<'_, Tensor>)>,
         backend: &str,
+        weights: &str,
     ) -> PyResult<DeviceModel> {
+        let format = weights.parse::<WeightFormat>().map_err(model_error)?;
         let field = |name: &str| {
             config
                 .get(name)
@@ -481,8 +486,8 @@ impl DeviceModel {
         };
         let tensors = state.into_iter().map(|(name, tensor)| (name, tensor.0.clone())).collect();
         let model = IntegerModel::from_tensors(config, &tensors).map_err(model_error)?;
-        let session = start_session(&model, backend)?;
-        Ok(DeviceModel { model, backend: backend.to_string(), session })
+        let session = start_session(&model, backend, format)?;
+        Ok(DeviceModel { model, backend: backend.to_string(), format, session })
     }
 
     #[getter]
@@ -496,8 +501,16 @@ impl DeviceModel {
     }
 
     #[getter]
-    fn ternary_weight_bytes(&self) -> usize {
-        self.model.ternary_weight_bytes()
+    fn weights(&self) -> &'static str {
+        match self.format {
+            WeightFormat::Ternary => "ternary",
+            WeightFormat::Int8 => "int8",
+        }
+    }
+
+    #[getter]
+    fn projection_weight_bytes(&self) -> usize {
+        self.model.projection_weight_bytes(self.format)
     }
 
     #[getter]
@@ -506,7 +519,7 @@ impl DeviceModel {
     }
 
     fn reset(&mut self) -> PyResult<()> {
-        self.session = start_session(&self.model, &self.backend)?;
+        self.session = start_session(&self.model, &self.backend, self.format)?;
         Ok(())
     }
 

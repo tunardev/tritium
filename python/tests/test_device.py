@@ -17,6 +17,14 @@ def test_backends_generate_identical_tokens():
     assert len(outputs["reference"]) == 4
 
 
+def test_int8_weights_generate_identical_tokens():
+    model = TernaryTransformer(CONFIG)
+    ternary = model.to("tritium", backend="simulator")
+    int8 = model.to("tritium", backend="simulator", weights="int8")
+    assert ternary.generate([4, 2], 5, seed=1) == int8.generate([4, 2], 5, seed=1)
+    assert int8.projection_weight_bytes >= 4 * ternary.projection_weight_bytes
+
+
 def test_generation_stops_at_context():
     device_model = TernaryTransformer(CONFIG).to("tritium", backend="reference")
     assert len(device_model.generate([1, 2, 3], 50)) == CONFIG.context - 3 + 1

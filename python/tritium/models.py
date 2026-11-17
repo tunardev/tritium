@@ -60,9 +60,10 @@ class TernaryTransformer(nn.Module):
             x = block(x, batch, self.config.heads)
         return self.head(x)
 
-    def to(self, device, backend="simulator"):
+    def to(self, device, backend="simulator", weights="ternary"):
         if device == "cpu":
             return self
         if device != "tritium":
             raise ValueError(f"unknown device {device!r}; expected 'cpu' or 'tritium'")
-        return DeviceModel(self.config.to_dict(), list(self.state_dict().items()), backend)
+        state = list(self.state_dict().items())
+        return DeviceModel(self.config.to_dict(), state, backend, weights)
