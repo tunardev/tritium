@@ -267,3 +267,13 @@ fn memory_timing_changes_only_cycles() {
     }
     assert!(cycles[0] < cycles[1] && cycles[1] < cycles[2], "{cycles:?}");
 }
+
+#[test]
+fn consecutive_launches_count_separately() {
+    let program = assemble("li r10, 3\nloop:\naddi r10, r10, -1\nbne r10, r0, loop\nexit").unwrap();
+    let mut device = RtlDevice::new(64);
+    let first = device.launch(&program, ONE_WARP, &[]).unwrap();
+    let second = device.launch(&program, ONE_WARP, &[]).unwrap();
+    assert_eq!(first.warp_instructions, 8);
+    assert_eq!(second, first);
+}

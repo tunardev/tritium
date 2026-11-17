@@ -73,3 +73,16 @@ fn invalid_shapes_are_rejected() {
     assert!(ModelConfig { heads: 3, ..SMALL }.validate().is_err());
     assert!(SMALL.validate().is_ok());
 }
+
+#[test]
+fn backends_retire_identical_instructions() {
+    let model = random_model(SMALL, 7);
+    let mut simulator = DeviceSession::new(&model, BackendKind::Simulator, WeightFormat::Ternary);
+    let mut rtl = DeviceSession::new(&model, BackendKind::Rtl, WeightFormat::Ternary);
+    for token in [4, 9, 2] {
+        simulator.decode(token).unwrap();
+        rtl.decode(token).unwrap();
+    }
+    assert_eq!(simulator.statistics().warp_instructions, rtl.statistics().warp_instructions);
+    assert!(rtl.statistics().cycles.unwrap() > rtl.statistics().warp_instructions);
+}

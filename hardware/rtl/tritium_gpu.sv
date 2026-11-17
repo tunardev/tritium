@@ -161,7 +161,6 @@ module tritium_gpu
               is_done <= 1'b0;
               fault_kind <= FAULT_NONE;
               next_block <= '0;
-              steps <= '0;
             end
           end
           HOST_GRID_BLOCKS: grid_blocks <= host_write_data;
@@ -181,7 +180,8 @@ module tritium_gpu
         endcase
       end
 
-      steps <= steps + 64'(retired);
+      if (host_write && host_address == HOST_STATUS && host_write_data[0]) steps <= '0;
+      else steps <= steps + 64'(retired);
 
       if (is_any_fault && fault_kind == FAULT_NONE) begin
         fault_kind <= unit_fault_kind[fault_unit];
