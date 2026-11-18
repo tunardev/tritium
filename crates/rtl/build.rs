@@ -40,7 +40,7 @@ fn main() {
     run(Command::new("verilator")
         .env("MACOSX_DEPLOYMENT_TARGET", &deployment_target)
         .args(["--cc", "--build", "-j", "0", "-O3", "--top-module", "tritium_gpu"])
-        .args(["-Wall", "-Wno-UNUSEDPARAM", "-Wno-UNUSEDSIGNAL"])
+        .args(["-Wall", "-Wno-UNUSEDPARAM", "-Wno-UNUSEDSIGNAL", "-CFLAGS", "-fPIC"])
         .arg("--Mdir")
         .arg(&model)
         .arg(format!("-I{}", rtl.display()))
