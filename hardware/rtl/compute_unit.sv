@@ -484,7 +484,7 @@ module compute_unit
           endcase
         end
         STATE_MEMORY_ADDRESS: begin
-          if ((lane_address & 32'(access_bytes - 1)) != 0)
+          if ((lane_address & (32'(access_bytes) - 32'd1)) != 0)
             raise(FAULT_MISALIGNED_ACCESS, lane_address);
           else if ({1'b0, lane_address} + 33'(access_bytes) > {1'b0, space_bytes})
             raise(FAULT_ADDRESS_OUT_OF_RANGE, lane_address);
