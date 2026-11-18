@@ -59,7 +59,8 @@ module compute_unit
     STATE_DOT_SUM,
     STATE_DOT_WRITE,
     STATE_FIXED_START,
-    STATE_FIXED_WAIT
+    STATE_FIXED_WAIT,
+    STATE_LANE
   } state_t;
 
   typedef enum logic [1:0] {
@@ -102,6 +103,10 @@ module compute_unit
   logic [LANES-1:0][31:0] operand_b;
   logic [LANES-1:0][31:0] operand_c;
   logic [LANES-1:0][31:0] results;
+  logic [31:0] lane_a;
+  logic [31:0] lane_b;
+  logic [31:0] lane_c;
+  state_t lane_target;
   logic is_writing_results;
   logic [31:0] next_program_counter;
   logic [LANES-1:0] write_enable;
@@ -188,8 +193,8 @@ module compute_unit
       .read_data(shared_read_data)
   );
 
-  assign dot_word_address = operand_c[lane][SHARED_BITS+1:2] + SHARED_BITS'(dot_word);
-  assign dot_window = dot_words >> {operand_c[lane][1:0], 3'b0};
+  assign dot_word_address = lane_c[SHARED_BITS+1:2] + SHARED_BITS'(dot_word);
+  assign dot_window = dot_words >> {lane_c[1:0], 3'b0};
   assign dot_activations = dot_window[159:0];
   assign is_serial = current.kind == KIND_REGISTER && current.operation inside {
       FUNCTION_TERNARY_DOT, FUNCTION_INT8_DOT, FUNCTION_SCALE, FUNCTION_EXP2,
@@ -203,8 +208,8 @@ module compute_unit
       .reset(reset),
       .start(state == STATE_FIXED_START),
       .operation(current.operation),
-      .left(operand_b[lane]),
-      .right(operand_c[lane]),
+      .left(lane_b),
+      .right(lane_c),
       .done(fixed_done),
       .result(fixed_result)
   );
@@ -293,7 +298,7 @@ module compute_unit
   end
 
   always_comb begin
-    lane_address = operand_b[lane] + current.immediate;
+    lane_address = lane_b + current.immediate;
     if (current.kind == KIND_STORE) begin
       unique case (current.width)
         STORE_WIDTH_WORD: access_bytes = 3'd4;
@@ -328,7 +333,7 @@ module compute_unit
   always_comb begin
     shared_address = lane_address[SHARED_BITS+1:2];
     shared_write_enable = '0;
-    shared_write_data = operand_a[lane] << {lane_address[1:0], 3'b0};
+    shared_write_data = lane_a << {lane_address[1:0], 3'b0};
     if (state == STATE_INITIALIZE) begin
       shared_address = initialize_index[SHARED_BITS-1:0];
       shared_write_enable = '1;
@@ -451,13 +456,18 @@ module compute_unit
           unique case (current.kind)
             KIND_LOAD, KIND_STORE: begin
               lane <= '0;
-              state <= STATE_MEMORY_ADDRESS;
+              lane_target <= STATE_MEMORY_ADDRESS;
+              state <= STATE_LANE;
             end
             KIND_REGISTER: begin
               lane <= '0;
-              if (current.operation inside {FUNCTION_TERNARY_DOT, FUNCTION_INT8_DOT})
-                state <= STATE_DOT_ADDRESS;
-              else if (is_serial) state <= STATE_FIXED_START;
+              if (current.operation inside {FUNCTION_TERNARY_DOT, FUNCTION_INT8_DOT}) begin
+                lane_target <= STATE_DOT_ADDRESS;
+                state <= STATE_LANE;
+              end else if (is_serial) begin
+                lane_target <= STATE_FIXED_START;
+                state <= STATE_LANE;
+              end
             end
             KIND_BRANCH: begin
               if (!is_branch_uniform) raise(FAULT_DIVERGENT_BRANCH, '0);
@@ -484,7 +494,7 @@ module compute_unit
             memory_request <= 1'b1;
             memory_write <= current.kind == KIND_STORE;
             memory_address <= {lane_address[31:2], 2'b0};
-            memory_write_data <= operand_a[lane] << {lane_address[1:0], 3'b0};
+            memory_write_data <= lane_a << {lane_address[1:0], 3'b0};
             memory_byte_enable <= byte_enable;
             state <= STATE_MEMORY_WAIT;
           end
@@ -493,19 +503,19 @@ module compute_unit
           if (is_access_complete) begin
             lane <= lane + 1;
             if (lane == '1) finish_instruction(link_address);
-            else state <= STATE_MEMORY_ADDRESS;
+            else state <= STATE_LANE;
           end
         end
         STATE_DOT_ADDRESS: begin
-          if (operand_b[lane][1:0] != 0) raise(FAULT_MISALIGNED_ACCESS, operand_b[lane]);
-          else if ({1'b0, operand_b[lane]} + 33'd4 > {1'b0, global_bytes})
-            raise(FAULT_ADDRESS_OUT_OF_RANGE, operand_b[lane]);
-          else if ({1'b0, operand_c[lane]} + dot_activation_bytes > {1'b0, shared_bytes})
-            raise(FAULT_ADDRESS_OUT_OF_RANGE, operand_c[lane]);
+          if (lane_b[1:0] != 0) raise(FAULT_MISALIGNED_ACCESS, lane_b);
+          else if ({1'b0, lane_b} + 33'd4 > {1'b0, global_bytes})
+            raise(FAULT_ADDRESS_OUT_OF_RANGE, lane_b);
+          else if ({1'b0, lane_c} + dot_activation_bytes > {1'b0, shared_bytes})
+            raise(FAULT_ADDRESS_OUT_OF_RANGE, lane_c);
           else begin
             memory_request <= 1'b1;
             memory_write <= 1'b0;
-            memory_address <= operand_b[lane];
+            memory_address <= lane_b;
             memory_byte_enable <= 4'b0000;
             state <= STATE_DOT_WEIGHTS;
           end
@@ -524,20 +534,26 @@ module compute_unit
           state <= dot_word == dot_last_word ? STATE_DOT_SUM : STATE_DOT_READ;
         end
         STATE_DOT_SUM: begin
-          dot_total <= operand_a[lane] + (is_int8_dot ? int8_sum : dot_sum);
+          dot_total <= lane_a + (is_int8_dot ? int8_sum : dot_sum);
           state <= STATE_DOT_WRITE;
         end
         STATE_DOT_WRITE: begin
           lane <= lane + 1;
           if (lane == '1) finish_instruction(link_address);
-          else state <= STATE_DOT_ADDRESS;
+          else state <= STATE_LANE;
+        end
+        STATE_LANE: begin
+          lane_a <= operand_a[lane];
+          lane_b <= operand_b[lane];
+          lane_c <= operand_c[lane];
+          state <= lane_target;
         end
         STATE_FIXED_START: state <= STATE_FIXED_WAIT;
         STATE_FIXED_WAIT: begin
           if (fixed_done) begin
             lane <= lane + 1;
             if (lane == '1) finish_instruction(link_address);
-            else state <= STATE_FIXED_START;
+            else state <= STATE_LANE;
           end
         end
         default: state <= STATE_IDLE;
