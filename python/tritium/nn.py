@@ -82,21 +82,24 @@ class BitLinear(Module):
     def __init__(self, in_features, out_features, input_scale=RESIDUAL_ONE, seed=0):
         super().__init__()
         self.input_scale = input_scale
-        self.weight = normal([out_features, in_features], 0.02, seed, True)
+        std = 1.0 / math.sqrt(in_features)
+        self.weight = normal([out_features, in_features], std, seed, True)
 
     def forward(self, input):
-        scaled = input * self.input_scale if self.input_scale != 1.0 else input
-        return F.bit_linear(scaled, self.weight)
+        output = F.bit_linear(input * self.input_scale, self.weight)
+        return output * (1.0 / self.input_scale)
 
 
 class Int8Linear(Module):
     def __init__(self, in_features, out_features, input_scale=RESIDUAL_ONE, seed=0):
         super().__init__()
         self.input_scale = input_scale
-        self.weight = normal([out_features, in_features], 0.02, seed, True)
+        std = 1.0 / math.sqrt(in_features)
+        self.weight = normal([out_features, in_features], std, seed, True)
 
     def forward(self, input):
-        return F.int8_linear(input * self.input_scale, self.weight)
+        output = F.int8_linear(input * self.input_scale, self.weight)
+        return output * (1.0 / self.input_scale)
 
 
 class Embedding(Module):

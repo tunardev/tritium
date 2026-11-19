@@ -1,5 +1,5 @@
 use tritium_framework::operations::{bit_linear, embedding, int8_linear, relu_squared, sum};
-use tritium_framework::quantization::{quantize_activations, ternarize};
+use tritium_framework::quantization::{activation_shift, quantize_activations, ternarize};
 use tritium_framework::{Tensor, Tokenizer};
 
 #[test]
@@ -11,12 +11,14 @@ fn bit_linear_matches_integer_product() {
     let (trits, scale) = ternarize(&weights);
     let mut expected = Vec::new();
     for row in input.chunks(3) {
-        let quantized =
-            quantize_activations(&row.iter().map(|&value| value as i32).collect::<Vec<_>>());
+        let integers: Vec<i32> = row.iter().map(|&value| value as i32).collect();
+        let quantized = quantize_activations(&integers);
+        let maximum = integers.iter().map(|value| value.abs()).max().unwrap();
+        let step = 2f32.powi(activation_shift(maximum));
         for weight_row in trits.chunks(3) {
             let dot: i32 =
                 quantized.iter().zip(weight_row).map(|(&a, &w)| i32::from(a) * i32::from(w)).sum();
-            expected.push(dot as f32 * scale / 3f32.sqrt());
+            expected.push(dot as f32 * scale * step);
         }
     }
     let actual = output.to_vec();

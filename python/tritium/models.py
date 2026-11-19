@@ -5,6 +5,8 @@ from tritium import nn
 from tritium._core import DeviceModel
 from tritium.nn import _seed
 
+SQUARED_ONE = nn.RESIDUAL_ONE * nn.RESIDUAL_ONE
+
 
 @dataclass(frozen=True)
 class TransformerConfig:
@@ -28,12 +30,12 @@ class Block(nn.Module):
         self.value = nn.BitLinear(width, width, seed=_seed(name + ".value"))
         self.output = nn.BitLinear(width, width, seed=_seed(name + ".output"))
         self.up = nn.BitLinear(width, hidden, seed=_seed(name + ".up"))
-        self.down = nn.BitLinear(hidden, width, input_scale=1.0, seed=_seed(name + ".down"))
+        self.down = nn.BitLinear(hidden, width, input_scale=SQUARED_ONE, seed=_seed(name + ".down"))
 
     def forward(self, x, batch, heads):
         attention = F.causal_attention(self.query(x), self.key(x), self.value(x), batch, heads)
         x = x + self.output(attention)
-        hidden = F.relu_squared(self.up(x) * nn.RESIDUAL_ONE)
+        hidden = F.relu_squared(self.up(x) * nn.RESIDUAL_ONE) * (1.0 / SQUARED_ONE)
         return x + self.down(hidden)
 
 

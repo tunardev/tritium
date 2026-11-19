@@ -209,9 +209,9 @@ fn quantized_linear(
     assert_eq!(inner, weight_inner, "input has {inner} features, weight expects {weight_inner}");
     let (quantized, steps) = quantize_rows_of_activations(&input.data(), inner);
     let mut data = matrix_product(rows, inner, outputs, &quantized, false, &effective_weight, true);
-    for row in data.chunks_exact_mut(outputs) {
+    for (row, step) in data.chunks_exact_mut(outputs).zip(&steps) {
         for (value, scale) in row.iter_mut().zip(&row_scales) {
-            *value *= scale;
+            *value *= scale * step;
         }
     }
     Tensor::from_operation(
@@ -220,9 +220,9 @@ fn quantized_linear(
         &[input, weight],
         Box::new(move |gradient| {
             let mut scaled = gradient.to_vec();
-            for row in scaled.chunks_exact_mut(outputs) {
+            for (row, step) in scaled.chunks_exact_mut(outputs).zip(&steps) {
                 for (value, scale) in row.iter_mut().zip(&row_scales) {
-                    *value *= scale;
+                    *value *= scale * step;
                 }
             }
             let mut input_gradient =
@@ -240,23 +240,18 @@ fn quantized_linear(
     )
 }
 
-pub fn fan_in_factor(inner: usize) -> f32 {
-    1.0 / (inner as f32).sqrt()
-}
-
 pub fn bit_linear(input: &Tensor, weight: &Tensor) -> Tensor {
-    let (outputs, inner) = matrix_shape(weight, "the weight");
+    let (outputs, _) = matrix_shape(weight, "the weight");
     let weight_data = weight.to_vec();
     let scale = ternary_scale(&weight_data);
     let trits = weight_data.iter().map(|value| (value / scale).round().clamp(-1.0, 1.0)).collect();
-    quantized_linear(input, weight, trits, vec![scale * fan_in_factor(inner); outputs])
+    quantized_linear(input, weight, trits, vec![scale; outputs])
 }
 
 pub fn int8_linear(input: &Tensor, weight: &Tensor) -> Tensor {
     let (_, columns) = matrix_shape(weight, "the weight");
     let (values, scales) = quantize_rows(&weight.data(), columns);
     let values = values.into_iter().map(f32::from).collect();
-    let scales = scales.into_iter().map(|scale| scale * fan_in_factor(columns)).collect();
     quantized_linear(input, weight, values, scales)
 }
 
