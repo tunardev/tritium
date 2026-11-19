@@ -6,7 +6,7 @@ kernel embed(tokens: *i8, token_factors: *i32, positions: *i8, position_factors:
     residual[index] = from_token + from_position;
 }
 
-kernel quantize(input: *i32, output: *i8, length: i32, squared: i32) {
+kernel quantize(input: *i32, output: *i8, length: i32, squared: i32, shift_slot: *i32) {
     shared maximum: [i32; 64];
     let thread = thread_index();
     let largest = 0;
@@ -35,6 +35,7 @@ kernel quantize(input: *i32, output: *i8, length: i32, squared: i32) {
     if absolute == 0 {
         shift = 0;
     }
+    shift_slot[0] = shift;
     for chunk in 0..(length >> 6) {
         let index = chunk * 64 + thread;
         let value = input[index];
@@ -48,8 +49,8 @@ kernel quantize(input: *i32, output: *i8, length: i32, squared: i32) {
     }
 }
 
-kernel ternary_project(input: *i8, weights: *i32, output: *i32, words: i32, factor: i32,
-                       accumulate: i32) {
+kernel ternary_project(input: *i8, weights: *i32, output: *i32, words: i32, mantissa: i32,
+                       exponent: i32, accumulate: i32, shift_slot: *i32) {
     shared vector: [i8; 640];
     let thread = thread_index();
     for chunk in 0..((words * 20 + 63) >> 6) {
@@ -62,7 +63,10 @@ kernel ternary_project(input: *i8, weights: *i32, output: *i32, words: i32, fact
     for word in 0..words {
         sum = tdot(sum, weights + row * words + word, vector, word * 20);
     }
-    let value = scale(sum, factor);
+    let total = max(min(shift_slot[0] + exponent, 31), -31);
+    let up = max(total, 0);
+    let down = max(0 - total, 0);
+    let value = ((scale(sum, mantissa) << up) + select(down, 1 << (down - 1), 0)) >> down;
     if accumulate != 0 {
         output[row] = output[row] + value;
     } else {
@@ -70,8 +74,8 @@ kernel ternary_project(input: *i8, weights: *i32, output: *i32, words: i32, fact
     }
 }
 
-kernel int8_project(input: *i8, weights: *i32, output: *i32, words: i32, factor: i32,
-                    accumulate: i32) {
+kernel int8_project(input: *i8, weights: *i32, output: *i32, words: i32, mantissa: i32,
+                    exponent: i32, accumulate: i32, shift_slot: *i32) {
     shared vector: [i8; 640];
     let thread = thread_index();
     for chunk in 0..((words * 4 + 63) >> 6) {
@@ -84,7 +88,10 @@ kernel int8_project(input: *i8, weights: *i32, output: *i32, words: i32, factor:
     for word in 0..words {
         sum = dot8(sum, weights + row * words + word, vector, word * 4);
     }
-    let value = scale(sum, factor);
+    let total = max(min(shift_slot[0] + exponent, 31), -31);
+    let up = max(total, 0);
+    let down = max(0 - total, 0);
+    let value = ((scale(sum, mantissa) << up) + select(down, 1 << (down - 1), 0)) >> down;
     if accumulate != 0 {
         output[row] = output[row] + value;
     } else {
@@ -157,7 +164,8 @@ kernel attention(query: *i32, keys: *i32, values: *i32, output: *i32, position: 
     output[base + offset] = accumulated;
 }
 
-kernel head(input: *i8, weights: *i32, factors: *i32, logits: *i32, width: i32) {
+kernel head(input: *i8, weights: *i32, factors: *i32, exponents: *i32, logits: *i32, width: i32,
+            shift_slot: *i32) {
     shared vector: [i32; 256];
     let thread = thread_index();
     for chunk in 0..(width >> 6) {
@@ -173,5 +181,8 @@ kernel head(input: *i8, weights: *i32, factors: *i32, logits: *i32, width: i32) 
         sum += ((packed << 24) >> 24) * vector[index] + ((packed << 16) >> 24) * vector[index + 1];
         sum += ((packed << 8) >> 24) * vector[index + 2] + (packed >> 24) * vector[index + 3];
     }
-    logits[row] = scale(sum, factors[row]);
+    let total = max(min(shift_slot[0] + exponents[row], 31), -31);
+    let up = max(total, 0);
+    let down = max(0 - total, 0);
+    logits[row] = ((scale(sum, factors[row]) << up) + select(down, 1 << (down - 1), 0)) >> down;
 }

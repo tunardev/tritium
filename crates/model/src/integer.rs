@@ -9,6 +9,8 @@ pub const SHARED_VECTOR_BYTES: usize = 640;
 pub const MAXIMUM_CONTEXT: usize = 128;
 pub const MAXIMUM_HEAD_INPUT: usize = 256;
 const RESIDUAL_ONE: f32 = 256.0;
+const SQUARED_ONE: f32 = RESIDUAL_ONE * RESIDUAL_ONE;
+pub const MAXIMUM_SHIFT: i32 = 31;
 const ACTIVATION_BITS: i32 = 7;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,7 +72,8 @@ pub struct Projection {
     pub words_per_row: usize,
     pub packed: Vec<u8>,
     pub trits: Vec<i8>,
-    pub factor: i32,
+    pub mantissa: i32,
+    pub exponent: i32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -109,6 +112,7 @@ pub struct Int8Rows {
     pub columns: usize,
     pub values: Vec<i8>,
     pub factors: Vec<i32>,
+    pub exponents: Vec<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -131,7 +135,25 @@ pub struct IntegerModel {
     pub attention_factor: i32,
 }
 
-fn projection(weight: &Tensor, rows: usize, inner: usize) -> Projection {
+pub fn split_factor(value: f32) -> (i32, i32) {
+    if value <= 0.0 {
+        return (0, 0);
+    }
+    let exponent = value.log2().ceil() as i32;
+    let mantissa = (f64::from(value) / 2f64.powi(exponent) * 65536.0).round() as i32;
+    if mantissa >= 65536 { (mantissa / 2, exponent + 1) } else { (mantissa, exponent) }
+}
+
+pub fn apply_shift(value: i32, shift: i32) -> i32 {
+    let shift = shift.clamp(-MAXIMUM_SHIFT, MAXIMUM_SHIFT);
+    if shift >= 0 {
+        value.wrapping_shl(shift as u32)
+    } else {
+        value.wrapping_add(1 << (-shift - 1)) >> -shift
+    }
+}
+
+fn projection(weight: &Tensor, rows: usize, inner: usize, input_scale: f32) -> Projection {
     let data = weight.data();
     let (trits, weight_scale) = ternarize(&data);
     let words_per_row = inner.div_ceil(TRITS_PER_WORD);
@@ -142,14 +164,20 @@ fn projection(weight: &Tensor, rows: usize, inner: usize) -> Projection {
         padded.extend_from_slice(row);
         padded.resize(padded.len() + words_per_row * TRITS_PER_WORD - inner, 0);
     }
-    let factor = to_fixed(weight_scale / (inner as f32).sqrt() * RESIDUAL_ONE);
-    Projection { rows, inner, words_per_row, packed, trits: padded, factor }
+    let (mantissa, exponent) = split_factor(weight_scale * RESIDUAL_ONE / input_scale);
+    Projection { rows, inner, words_per_row, packed, trits: padded, mantissa, exponent }
 }
 
-fn int8_rows(weight: &Tensor, columns: usize, factor_of: impl Fn(f32) -> f32) -> Int8Rows {
+fn embedding_rows(weight: &Tensor, columns: usize) -> Int8Rows {
     let (values, scales) = quantize_rows(&weight.data(), columns);
-    let factors = scales.into_iter().map(|scale| to_fixed(factor_of(scale))).collect();
-    Int8Rows { columns, values, factors }
+    let factors = scales.iter().map(|&scale| to_fixed(scale * RESIDUAL_ONE)).collect();
+    Int8Rows { columns, values, factors, exponents: vec![0; scales.len()] }
+}
+
+fn head_rows(weight: &Tensor, columns: usize) -> Int8Rows {
+    let (values, scales) = quantize_rows(&weight.data(), columns);
+    let (factors, exponents) = scales.into_iter().map(split_factor).unzip();
+    Int8Rows { columns, values, factors, exponents }
 }
 
 impl IntegerModel {
@@ -173,37 +201,29 @@ impl IntegerModel {
         for index in 0..config.layers {
             let name = |part: &str| format!("blocks.{index}.{part}.weight");
             let square = |part: &str| -> Result<Projection, ModelError> {
-                Ok(projection(get(&name(part), [width, width])?, width, width))
+                Ok(projection(get(&name(part), [width, width])?, width, width, RESIDUAL_ONE))
             };
             layers.push(Layer {
                 query: square("query")?,
                 key: square("key")?,
                 value: square("value")?,
                 output: square("output")?,
-                up: projection(get(&name("up"), [hidden, width])?, hidden, width),
-                down: projection(get(&name("down"), [width, hidden])?, width, hidden),
+                up: projection(get(&name("up"), [hidden, width])?, hidden, width, RESIDUAL_ONE),
+                down: projection(get(&name("down"), [width, hidden])?, width, hidden, SQUARED_ONE),
             });
         }
-        let embedding_factor = |scale: f32| scale * RESIDUAL_ONE;
-        let head_factor = |scale: f32| scale / (width as f32).sqrt() * RESIDUAL_ONE;
         Ok(IntegerModel {
             config,
-            token_embedding: int8_rows(
+            token_embedding: embedding_rows(
                 get("token_embedding.weight", [config.vocabulary_size, width])?,
                 width,
-                embedding_factor,
             ),
-            position_embedding: int8_rows(
+            position_embedding: embedding_rows(
                 get("position_embedding.weight", [config.context, width])?,
                 width,
-                embedding_factor,
             ),
             layers,
-            head: int8_rows(
-                get("head.weight", [config.vocabulary_size, width])?,
-                width,
-                head_factor,
-            ),
+            head: head_rows(get("head.weight", [config.vocabulary_size, width])?, width),
             attention_factor: to_fixed(
                 std::f32::consts::LOG2_E / (config.head_width() as f32).sqrt(),
             ),
@@ -221,7 +241,13 @@ impl IntegerModel {
     }
 }
 
-pub fn quantize(values: &[i32], is_squared: bool) -> Vec<i8> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Quantized {
+    pub values: Vec<i8>,
+    pub shift: i32,
+}
+
+pub fn quantize(values: &[i32], is_squared: bool) -> Quantized {
     let prepare = |value: i32| {
         if is_squared {
             let rectified = value.clamp(0, 32767);
@@ -236,7 +262,7 @@ pub fn quantize(values: &[i32], is_squared: bool) -> Vec<i8> {
     });
     let bits = 32 - largest.leading_zeros() as i32;
     let shift = if largest == 0 { 0 } else { bits - ACTIVATION_BITS };
-    values
+    let values = values
         .iter()
         .map(|&value| {
             let value = prepare(value);
@@ -246,11 +272,12 @@ pub fn quantize(values: &[i32], is_squared: bool) -> Vec<i8> {
                 saturate_to_int8(value.wrapping_add(1 << (shift - 1)) >> shift) as i8
             }
         })
-        .collect()
+        .collect();
+    Quantized { values, shift }
 }
 
-fn project(projection: &Projection, input: &[i8]) -> Vec<i32> {
-    let mut activations = input.to_vec();
+fn project(projection: &Projection, input: &Quantized) -> Vec<i32> {
+    let mut activations = input.values.clone();
     activations.resize(projection.words_per_row * TRITS_PER_WORD, 0);
     projection
         .packed
@@ -263,7 +290,7 @@ fn project(projection: &Projection, input: &[i8]) -> Vec<i32> {
                     sum.wrapping_add(i32::from(trit) * i32::from(activation))
                 })
             });
-            scale(sum, projection.factor)
+            apply_shift(scale(sum, projection.mantissa), input.shift + projection.exponent)
         })
         .collect()
 }
@@ -322,17 +349,18 @@ impl ReferenceSession {
             let hidden = project(&layer.up, &quantize(&residual, false));
             add_into(&mut residual, &project(&layer.down, &quantize(&hidden, true)));
         }
-        let input: Vec<i32> = quantize(&residual, false).into_iter().map(i32::from).collect();
+        let quantized = quantize(&residual, false);
+        let input: Vec<i32> = quantized.values.iter().map(|&value| i32::from(value)).collect();
         let head = &model.head;
         let logits = head
             .values
             .chunks_exact(width)
-            .zip(&head.factors)
-            .map(|(row, &factor)| {
+            .zip(head.factors.iter().zip(&head.exponents))
+            .map(|(row, (&factor, &exponent))| {
                 let sum = row.iter().zip(&input).fold(0i32, |sum, (&weight, &value)| {
                     sum.wrapping_add(multiply_halfwords(i32::from(weight), value))
                 });
-                scale(sum, factor)
+                apply_shift(scale(sum, factor), quantized.shift + exponent)
             })
             .collect();
         self.position += 1;

@@ -36,7 +36,8 @@ struct PlacedProjection {
     address: u32,
     rows: u32,
     words_per_row: u32,
-    factor: i32,
+    mantissa: i32,
+    exponent: i32,
 }
 
 struct PlacedLayer {
@@ -58,6 +59,8 @@ struct Layout {
     layers: Vec<PlacedLayer>,
     head_values: u32,
     head_factors: u32,
+    head_exponents: u32,
+    shift: u32,
     residual: u32,
     query: u32,
     attended: u32,
@@ -101,7 +104,8 @@ impl Memory {
             address: self.place(&projection.weight_bytes(format)),
             rows: projection.rows as u32,
             words_per_row: words_per_row as u32,
-            factor: projection.factor,
+            mantissa: projection.mantissa,
+            exponent: projection.exponent,
         }
     }
 }
@@ -159,6 +163,7 @@ impl DeviceSession {
             .collect();
         let head_values = memory.place(&bytes_of(&model.head.values));
         let head_factors = memory.place_words(&model.head.factors);
+        let head_exponents = memory.place_words(&model.head.exponents);
         let layout = Layout {
             token_values,
             token_factors,
@@ -167,6 +172,8 @@ impl DeviceSession {
             layers,
             head_values,
             head_factors,
+            head_exponents,
+            shift: memory.reserve(4),
             residual: memory.reserve(config.width * 4),
             query: memory.reserve(config.width * 4),
             attended: memory.reserve(config.width * 4),
@@ -226,7 +233,8 @@ impl DeviceSession {
     }
 
     fn quantize(&mut self, input: u32, length: u32, is_squared: bool) -> Result<(), ModelError> {
-        let arguments = [input, self.layout.quantized, length, u32::from(is_squared)];
+        let arguments =
+            [input, self.layout.quantized, length, u32::from(is_squared), self.layout.shift];
         self.launch(|kernels| &kernels.quantize, 1, &arguments)
     }
 
@@ -241,8 +249,10 @@ impl DeviceSession {
             projection.address,
             output,
             projection.words_per_row,
-            projection.factor as u32,
+            projection.mantissa as u32,
+            projection.exponent as u32,
             u32::from(is_accumulating),
+            self.layout.shift,
         ];
         let blocks = projection.rows / BLOCK_THREADS;
         match self.format {
@@ -306,8 +316,10 @@ impl DeviceSession {
             self.layout.quantized,
             self.layout.head_values,
             self.layout.head_factors,
+            self.layout.head_exponents,
             self.layout.logits,
             width,
+            self.layout.shift,
         ];
         let blocks = self.vocabulary_size as u32 / BLOCK_THREADS;
         self.launch(|kernels| &kernels.head, blocks, &head_arguments)?;
