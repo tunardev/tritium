@@ -50,7 +50,6 @@ module compute_unit
     STATE_READ,
     STATE_OPERANDS,
     STATE_EXECUTE,
-    STATE_WRITEBACK,
     STATE_MEMORY_ADDRESS,
     STATE_MEMORY_WAIT,
     STATE_DOT_ADDRESS,
@@ -123,7 +122,6 @@ module compute_unit
   logic [31:0] lane_c;
   state_t lane_target;
   logic is_writing_results;
-  logic [31:0] next_program_counter;
   logic [LANES-1:0] write_enable;
   logic [REGISTER_ADDRESS_BITS-1:0] write_address;
   logic [LANES-1:0][31:0] write_data;
@@ -378,7 +376,7 @@ module compute_unit
             write_data[index] = arguments[initialize_register-1];
         end
       end
-      STATE_WRITEBACK: begin
+      STATE_SELECT: begin
         write_enable = {LANES{is_writing_results && destination != 0}};
         write_data = results;
       end
@@ -441,6 +439,7 @@ module compute_unit
               program_counters[index] <= '0;
             end
             warp <= WARP_BITS'(MAX_WARPS - 1);
+            is_writing_results <= 1'b0;
             initialize_index <= '0;
             initialize_count <= (SHARED_BITS + 1)'((shared_bytes + 3) / 4);
             if ((shared_bytes + 3) / 4 < 2 ** REGISTER_ADDRESS_BITS)
@@ -453,6 +452,7 @@ module compute_unit
           if (initialize_index == initialize_count - 1) state <= STATE_SELECT;
         end
         STATE_SELECT: begin
+          is_writing_results <= 1'b0;
           if (is_any_running) begin
             warp <= next_warp;
             state <= STATE_FETCH;
@@ -478,49 +478,49 @@ module compute_unit
         end
         STATE_READ: state <= STATE_OPERANDS;
         STATE_OPERANDS: state <= STATE_EXECUTE;
-        STATE_WRITEBACK: finish_instruction(next_program_counter);
         STATE_EXECUTE: begin
           results <= lane_results;
           is_writing_results <= !is_serial && current.kind inside {KIND_REGISTER, KIND_IMMEDIATE,
               KIND_LOAD_UPPER, KIND_READ_SPECIAL, KIND_JUMP_AND_LINK, KIND_JUMP_AND_LINK_REGISTER};
-          next_program_counter <= link_address;
-          state <= STATE_WRITEBACK;
+          lane <= '0;
+          issued <= '0;
+          received <= '0;
+          has_pending_fault <= 1'b0;
           unique case (current.kind)
             KIND_LOAD, KIND_STORE: begin
-              lane <= '0;
-              issued <= '0;
-              received <= '0;
-              has_pending_fault <= 1'b0;
               is_streaming <= !current.is_shared;
               lane_target <= current.is_shared ? STATE_MEMORY_ADDRESS : STATE_STREAM_ISSUE;
               state <= STATE_LANE;
             end
             KIND_REGISTER: begin
-              lane <= '0;
               if (current.operation inside {FUNCTION_TERNARY_DOT, FUNCTION_INT8_DOT}) begin
-                issued <= '0;
-                received <= '0;
-                has_pending_fault <= 1'b0;
                 is_streaming <= 1'b1;
                 lane_target <= STATE_DOT_ADDRESS;
                 state <= STATE_LANE;
               end else if (is_serial) begin
                 lane_target <= STATE_FIXED_START;
                 state <= STATE_LANE;
-              end
+              end else finish_instruction(link_address);
             end
             KIND_BRANCH: begin
               if (!is_branch_uniform) raise(FAULT_DIVERGENT_BRANCH, '0);
-              else if (is_taken[0]) next_program_counter <= program_counter + current.immediate;
+              else if (is_taken[0]) finish_instruction(program_counter + current.immediate);
+              else finish_instruction(link_address);
             end
-            KIND_JUMP_AND_LINK: next_program_counter <= program_counter + current.immediate;
+            KIND_JUMP_AND_LINK: finish_instruction(program_counter + current.immediate);
             KIND_JUMP_AND_LINK_REGISTER: begin
               if (!is_jump_uniform) raise(FAULT_DIVERGENT_BRANCH, '0);
-              else next_program_counter <= jump_targets[0];
+              else finish_instruction(jump_targets[0]);
             end
-            KIND_BARRIER: warp_status[warp] <= WARP_AT_BARRIER;
-            KIND_EXIT: warp_status[warp] <= WARP_EXITED;
-            default: ;
+            KIND_BARRIER: begin
+              warp_status[warp] <= WARP_AT_BARRIER;
+              finish_instruction(link_address);
+            end
+            KIND_EXIT: begin
+              warp_status[warp] <= WARP_EXITED;
+              finish_instruction(link_address);
+            end
+            default: finish_instruction(link_address);
           endcase
         end
         STATE_MEMORY_ADDRESS: begin
