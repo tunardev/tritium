@@ -184,6 +184,18 @@ fn ternary_dot_matches_unaligned_activations() {
 }
 
 #[test]
+fn ternary_dot_reuses_shared_windows() {
+    let source = "sreg r10, lane_index\nslli r11, r10, 3\nadd r12, r2, r11\nlw r13, 0(r12)\n\
+                  lw r14, 4(r12)\nsws r13, 0(r11)\nsws r14, 4(r11)\nbar\nslli r15, r10, 2\n\
+                  add r16, r1, r15\nsrli r17, r10, 2\nli r18, 3\nmul16 r17, r17, r18\n\
+                  li r19, 9\ntdot r19, r16, r17\ndot8 r19, r16, r17\nadd r20, r3, r15\n\
+                  sw r19, 0(r20)\nexit";
+    let config = LaunchConfig { shared_bytes: 128, ..ONE_WARP };
+    let memory = pseudo_random_bytes(11, 1024);
+    assert_matches_simulator(source, config, &[0, 256, 512], &memory).unwrap();
+}
+
+#[test]
 fn int8_dot_matches_unaligned_activations() {
     let source = "sreg r10, lane_index\nslli r11, r10, 3\nadd r12, r2, r11\nlw r13, 0(r12)\n\
                   lw r14, 4(r12)\nsws r13, 0(r11)\nsws r14, 4(r11)\nbar\nslli r15, r10, 2\n\

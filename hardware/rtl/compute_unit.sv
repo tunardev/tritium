@@ -108,6 +108,8 @@ module compute_unit
   logic [LANES-1:0][31:0] operand_c;
   logic [LANES-1:0][31:0] results;
   logic is_streaming;
+  logic is_window_valid;
+  logic [31:0] window_address;
   logic [$clog2(LANES):0] issued;
   logic [$clog2(LANES):0] received;
   logic [LANES-1:0][1:0] lane_offsets;
@@ -607,6 +609,7 @@ module compute_unit
             if (has_pending_fault) raise(pending_kind, pending_value);
             else begin
               lane <= '0;
+              is_window_valid <= 1'b0;
               lane_target <= STATE_DOT_READ;
               state <= STATE_LANE;
             end
@@ -616,7 +619,11 @@ module compute_unit
         STATE_DOT_CAPTURE: begin
           dot_words[dot_word] <= shared_read_data;
           dot_word <= dot_word + 1;
-          state <= dot_word == dot_last_word ? STATE_DOT_SUM : STATE_DOT_READ;
+          if (dot_word == dot_last_word) begin
+            is_window_valid <= 1'b1;
+            window_address <= lane_c;
+            state <= STATE_DOT_SUM;
+          end else state <= STATE_DOT_READ;
         end
         STATE_DOT_SUM: begin
           dot_total <= lane_a + (is_int8_dot ? int8_sum : dot_sum);
@@ -633,7 +640,9 @@ module compute_unit
           lane_c <= operand_c[lane];
           dot_weights <= lane_weights[lane];
           dot_word <= '0;
-          state <= lane_target;
+          if (lane_target == STATE_DOT_READ && is_window_valid && operand_c[lane] == window_address)
+            state <= STATE_DOT_SUM;
+          else state <= lane_target;
         end
         STATE_FIXED_START: state <= STATE_FIXED_WAIT;
         STATE_FIXED_WAIT: begin
