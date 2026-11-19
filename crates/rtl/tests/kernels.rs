@@ -277,3 +277,25 @@ fn consecutive_launches_count_separately() {
     assert_eq!(first.warp_instructions, 8);
     assert_eq!(second, first);
 }
+
+#[test]
+fn launch_after_fault_starts_clean() {
+    let faulting =
+        assemble("sreg r10, lane_index\nslli r10, r10, 4\nlw r11, 0(r10)\nexit").unwrap();
+    let copy = assemble(
+        "sreg r10, lane_index\nslli r10, r10, 2\nlw r11, 0(r10)\naddi r11, r11, 3\n\
+         sw r11, 64(r10)\nexit",
+    )
+    .unwrap();
+    let memory = pseudo_random_bytes(10, 136);
+    let mut device = RtlDevice::new(136);
+    device.global_mut().copy_from_slice(&memory);
+    let fault = device.launch(&faulting, ONE_WARP, &[]).unwrap_err();
+    assert!(matches!(fault, Fault::AddressOutOfRange { address: 144, .. }), "{fault:?}");
+    device.launch(&copy, ONE_WARP, &[]).unwrap();
+    for lane in 0..16 {
+        let source = u32::from_le_bytes(memory[4 * lane..][..4].try_into().unwrap());
+        let stored = u32::from_le_bytes(device.global()[64 + 4 * lane..][..4].try_into().unwrap());
+        assert_eq!(stored, source.wrapping_add(3), "lane {lane}");
+    }
+}

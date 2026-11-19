@@ -34,6 +34,7 @@ module compute_unit
     output logic [31:0] memory_address,
     output logic [ 3:0] memory_byte_enable,
     output logic [31:0] memory_write_data,
+    input  logic        memory_accepted,
     input  logic        memory_response,
     input  logic [31:0] memory_read_data
 );
@@ -53,14 +54,18 @@ module compute_unit
     STATE_MEMORY_ADDRESS,
     STATE_MEMORY_WAIT,
     STATE_DOT_ADDRESS,
-    STATE_DOT_WEIGHTS,
     STATE_DOT_READ,
     STATE_DOT_CAPTURE,
     STATE_DOT_SUM,
     STATE_DOT_WRITE,
     STATE_FIXED_START,
     STATE_FIXED_WAIT,
-    STATE_LANE
+    STATE_LANE,
+    STATE_STREAM_ISSUE,
+    STATE_STREAM_ACCEPT,
+    STATE_STREAM_DRAIN,
+    STATE_DOT_ACCEPT,
+    STATE_DOT_DRAIN
   } state_t;
 
   typedef enum logic [1:0] {
@@ -103,6 +108,16 @@ module compute_unit
   logic [LANES-1:0][31:0] operand_b;
   logic [LANES-1:0][31:0] operand_c;
   logic [LANES-1:0][31:0] results;
+  logic is_streaming;
+  logic [$clog2(LANES):0] issued;
+  logic [$clog2(LANES):0] received;
+  logic [LANES-1:0][1:0] lane_offsets;
+  logic [LANES-1:0][31:0] lane_weights;
+  logic has_pending_fault;
+  fault_t pending_kind;
+  logic [31:0] pending_value;
+  logic [31:0] stream_shifted;
+  logic [31:0] stream_value;
   logic [31:0] lane_a;
   logic [31:0] lane_b;
   logic [31:0] lane_c;
@@ -297,6 +312,16 @@ module compute_unit
     end
   end
 
+  function automatic logic [31:0] extend(input logic [31:0] value, input logic [2:0] width);
+    unique case (width)
+      WIDTH_HALF: return {{16{value[15]}}, value[15:0]};
+      WIDTH_HALF_UNSIGNED: return {16'b0, value[15:0]};
+      WIDTH_BYTE: return {{24{value[7]}}, value[7:0]};
+      WIDTH_BYTE_UNSIGNED: return {24'b0, value[7:0]};
+      default: return value;
+    endcase
+  endfunction
+
   always_comb begin
     lane_address = lane_b + current.immediate;
     if (current.kind == KIND_STORE) begin
@@ -318,16 +343,12 @@ module compute_unit
       default: byte_enable = 4'b0001 << lane_address[1:0];
     endcase
     space_bytes = current.is_shared ? shared_bytes : global_bytes;
-    is_access_complete = current.is_shared || memory_response;
-    access_read_data = current.is_shared ? shared_read_data : memory_read_data;
+    is_access_complete = current.is_shared;
+    access_read_data = shared_read_data;
     shifted_read_data = access_read_data >> {lane_address[1:0], 3'b0};
-    unique case (current.width)
-      WIDTH_HALF: loaded_value = {{16{shifted_read_data[15]}}, shifted_read_data[15:0]};
-      WIDTH_HALF_UNSIGNED: loaded_value = {16'b0, shifted_read_data[15:0]};
-      WIDTH_BYTE: loaded_value = {{24{shifted_read_data[7]}}, shifted_read_data[7:0]};
-      WIDTH_BYTE_UNSIGNED: loaded_value = {24'b0, shifted_read_data[7:0]};
-      default: loaded_value = shifted_read_data;
-    endcase
+    loaded_value = extend(shifted_read_data, current.width);
+    stream_shifted = memory_read_data >> {lane_offsets[received[$clog2(LANES)-1:0]], 3'b0};
+    stream_value = extend(stream_shifted, current.width);
   end
 
   always_comb begin
@@ -376,6 +397,11 @@ module compute_unit
       end
       default: ;
     endcase
+    if (is_streaming && memory_response && current.kind == KIND_LOAD && destination != 0) begin
+      write_enable = '0;
+      write_enable[received[$clog2(LANES)-1:0]] = 1'b1;
+      write_data = {LANES{stream_value}};
+    end
   end
 
   task automatic raise(input fault_t kind, input logic [31:0] value);
@@ -396,9 +422,15 @@ module compute_unit
   always_ff @(posedge clock) begin
     retire <= 1'b0;
     fault <= 1'b0;
-    memory_request <= 1'b0;
+    if (memory_accepted) memory_request <= 1'b0;
+    if (is_streaming && memory_response) begin
+      received <= received + 1;
+      lane_weights[received[$clog2(LANES)-1:0]] <= memory_read_data;
+    end
     if (reset) begin
       state <= STATE_IDLE;
+      memory_request <= 1'b0;
+      is_streaming <= 1'b0;
     end else begin
       unique case (state)
         STATE_IDLE: begin
@@ -456,12 +488,20 @@ module compute_unit
           unique case (current.kind)
             KIND_LOAD, KIND_STORE: begin
               lane <= '0;
-              lane_target <= STATE_MEMORY_ADDRESS;
+              issued <= '0;
+              received <= '0;
+              has_pending_fault <= 1'b0;
+              is_streaming <= !current.is_shared;
+              lane_target <= current.is_shared ? STATE_MEMORY_ADDRESS : STATE_STREAM_ISSUE;
               state <= STATE_LANE;
             end
             KIND_REGISTER: begin
               lane <= '0;
               if (current.operation inside {FUNCTION_TERNARY_DOT, FUNCTION_INT8_DOT}) begin
+                issued <= '0;
+                received <= '0;
+                has_pending_fault <= 1'b0;
+                is_streaming <= 1'b1;
                 lane_target <= STATE_DOT_ADDRESS;
                 state <= STATE_LANE;
               end else if (is_serial) begin
@@ -488,43 +528,88 @@ module compute_unit
             raise(FAULT_MISALIGNED_ACCESS, lane_address);
           else if ({1'b0, lane_address} + 33'(access_bytes) > {1'b0, space_bytes})
             raise(FAULT_ADDRESS_OUT_OF_RANGE, lane_address);
-          else if (current.is_shared) begin
-            state <= STATE_MEMORY_WAIT;
+          else state <= STATE_MEMORY_WAIT;
+        end
+        STATE_MEMORY_WAIT: begin
+          lane <= lane + 1;
+          if (lane == '1) finish_instruction(link_address);
+          else state <= STATE_LANE;
+        end
+        STATE_STREAM_ISSUE: begin
+          if ((lane_address & (32'(access_bytes) - 32'd1)) != 0) begin
+            has_pending_fault <= 1'b1;
+            pending_kind <= FAULT_MISALIGNED_ACCESS;
+            pending_value <= lane_address;
+            state <= STATE_STREAM_DRAIN;
+          end else if ({1'b0, lane_address} + 33'(access_bytes) > {1'b0, global_bytes}) begin
+            has_pending_fault <= 1'b1;
+            pending_kind <= FAULT_ADDRESS_OUT_OF_RANGE;
+            pending_value <= lane_address;
+            state <= STATE_STREAM_DRAIN;
           end else begin
             memory_request <= 1'b1;
             memory_write <= current.kind == KIND_STORE;
             memory_address <= {lane_address[31:2], 2'b0};
             memory_write_data <= lane_a << {lane_address[1:0], 3'b0};
             memory_byte_enable <= byte_enable;
-            state <= STATE_MEMORY_WAIT;
+            lane_offsets[lane] <= lane_address[1:0];
+            state <= STATE_STREAM_ACCEPT;
           end
         end
-        STATE_MEMORY_WAIT: begin
-          if (is_access_complete) begin
+        STATE_STREAM_ACCEPT: begin
+          if (memory_accepted) begin
+            issued <= issued + 1;
             lane <= lane + 1;
-            if (lane == '1) finish_instruction(link_address);
-            else state <= STATE_LANE;
+            state <= lane == '1 ? STATE_STREAM_DRAIN : STATE_LANE;
+          end
+        end
+        STATE_STREAM_DRAIN: begin
+          if (received == issued) begin
+            is_streaming <= 1'b0;
+            if (has_pending_fault) raise(pending_kind, pending_value);
+            else finish_instruction(link_address);
           end
         end
         STATE_DOT_ADDRESS: begin
-          if (lane_b[1:0] != 0) raise(FAULT_MISALIGNED_ACCESS, lane_b);
-          else if ({1'b0, lane_b} + 33'd4 > {1'b0, global_bytes})
-            raise(FAULT_ADDRESS_OUT_OF_RANGE, lane_b);
-          else if ({1'b0, lane_c} + dot_activation_bytes > {1'b0, shared_bytes})
-            raise(FAULT_ADDRESS_OUT_OF_RANGE, lane_c);
-          else begin
+          if (lane_b[1:0] != 0) begin
+            has_pending_fault <= 1'b1;
+            pending_kind <= FAULT_MISALIGNED_ACCESS;
+            pending_value <= lane_b;
+            state <= STATE_DOT_DRAIN;
+          end else if ({1'b0, lane_b} + 33'd4 > {1'b0, global_bytes}) begin
+            has_pending_fault <= 1'b1;
+            pending_kind <= FAULT_ADDRESS_OUT_OF_RANGE;
+            pending_value <= lane_b;
+            state <= STATE_DOT_DRAIN;
+          end else if ({1'b0, lane_c} + dot_activation_bytes > {1'b0, shared_bytes}) begin
+            has_pending_fault <= 1'b1;
+            pending_kind <= FAULT_ADDRESS_OUT_OF_RANGE;
+            pending_value <= lane_c;
+            state <= STATE_DOT_DRAIN;
+          end else begin
             memory_request <= 1'b1;
             memory_write <= 1'b0;
             memory_address <= lane_b;
             memory_byte_enable <= 4'b0000;
-            state <= STATE_DOT_WEIGHTS;
+            state <= STATE_DOT_ACCEPT;
           end
         end
-        STATE_DOT_WEIGHTS: begin
-          if (memory_response) begin
-            dot_weights <= memory_read_data;
-            dot_word <= '0;
-            state <= STATE_DOT_READ;
+        STATE_DOT_ACCEPT: begin
+          if (memory_accepted) begin
+            issued <= issued + 1;
+            lane <= lane + 1;
+            state <= lane == '1 ? STATE_DOT_DRAIN : STATE_LANE;
+          end
+        end
+        STATE_DOT_DRAIN: begin
+          if (received == issued) begin
+            is_streaming <= 1'b0;
+            if (has_pending_fault) raise(pending_kind, pending_value);
+            else begin
+              lane <= '0;
+              lane_target <= STATE_DOT_READ;
+              state <= STATE_LANE;
+            end
           end
         end
         STATE_DOT_READ: state <= STATE_DOT_CAPTURE;
@@ -546,6 +631,8 @@ module compute_unit
           lane_a <= operand_a[lane];
           lane_b <= operand_b[lane];
           lane_c <= operand_c[lane];
+          dot_weights <= lane_weights[lane];
+          dot_word <= '0;
           state <= lane_target;
         end
         STATE_FIXED_START: state <= STATE_FIXED_WAIT;

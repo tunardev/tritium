@@ -57,6 +57,7 @@ module tritium_gpu
   logic [COMPUTE_UNITS-1:0][31:0] unit_memory_address;
   logic [COMPUTE_UNITS-1:0][3:0] unit_memory_byte_enable;
   logic [COMPUTE_UNITS-1:0][31:0] unit_memory_write_data;
+  logic [COMPUTE_UNITS-1:0] unit_memory_accepted;
   logic [COMPUTE_UNITS-1:0] unit_memory_response;
 
   logic program_write;
@@ -101,13 +102,15 @@ module tritium_gpu
         .memory_address(unit_memory_address[unit]),
         .memory_byte_enable(unit_memory_byte_enable[unit]),
         .memory_write_data(unit_memory_write_data[unit]),
+        .memory_accepted(unit_memory_accepted[unit]),
         .memory_response(unit_memory_response[unit]),
         .memory_read_data(memory_read_data)
     );
   end
 
   memory_arbiter #(
-      .UNITS(COMPUTE_UNITS)
+      .UNITS(COMPUTE_UNITS),
+      .OUTSTANDING(2 ** $clog2(LANES * COMPUTE_UNITS))
   ) memory_arbiter (
       .clock(clock),
       .reset(reset),
@@ -116,6 +119,7 @@ module tritium_gpu
       .unit_address(unit_memory_address),
       .unit_byte_enable(unit_memory_byte_enable),
       .unit_write_data(unit_memory_write_data),
+      .unit_accepted(unit_memory_accepted),
       .unit_response(unit_memory_response),
       .memory_request(memory_request),
       .memory_write(memory_write),
