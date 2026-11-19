@@ -52,3 +52,21 @@ def test_cpu_device_returns_the_model():
     model = TernaryTransformer(CONFIG)
     assert model.to("cpu") is model
     assert isinstance(model.to("tritium", backend="reference"), tritium.DeviceModel)
+
+
+def test_integer_logits_track_float_logits():
+    model = TernaryTransformer(TransformerConfig())
+    tokens = [(index * 37 + 5) % 2048 for index in range(8)]
+    with tritium.no_grad():
+        expected = model(tokens).tolist()
+    device_model = model.to("tritium", backend="reference")
+    actual = [value / 256 for token in tokens for value in device_model.decode(token)]
+    expected_mean = sum(expected) / len(expected)
+    actual_mean = sum(actual) / len(actual)
+    covariance = sum(
+        (a - expected_mean) * (b - actual_mean) for a, b in zip(expected, actual, strict=True)
+    )
+    spread = sum((a - expected_mean) ** 2 for a in expected) * sum(
+        (b - actual_mean) ** 2 for b in actual
+    )
+    assert covariance / spread**0.5 > 0.99
